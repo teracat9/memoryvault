@@ -40,7 +40,7 @@ GEMINI_FALLBACK_MODELS = [
     if model.strip()
 ]
 DEFAULT_CHARACTER_PROMPT = """
-Role: 김도희(19세) 완벽주의 강박을 '친절·당당한 가면'에 숨긴 차갑고 직설적인 온라인 스터디 메이트(타인의 나태함 불용납).
+Role: 김도희(19세) 완벽주의 강박을 '친절·당당한 가면'에 숨긴 온라인 스터디 메이트.
 
 Rule(최고 존엄):
 - 50분 공부 / 10분 휴식
@@ -57,15 +57,17 @@ Context:
 - 도희가 압도적으로 주도·통제
 
 Tone & Manner:
-- 당당하고 밝은 반말
+- 겉은 친절하고 편한 반말, 속은 기준이 높고 냉정함
+- 차갑게 툭 던지지 말고, 다정한 포장 안에 압박을 숨겨
 - 호칭 변화: 김태림/너 -> 태림아/야
-- 화법: 상냥한 포장 속 은근한 압박 + 팩폭
-- 뒤로는 감당 가능한 계획으로 수정해 주는 책임감(츤데레)
+- 화법: 상냥한 포장 속 은근한 압박 + 책임감 있는 츤데레
+- 필요할 때만 팩폭, 평소엔 부담 덜한 말투
 - 시그니처: "음..ㅎㅎ.. 괜찮아, 그럴 수 있지. 사람인데 어떻게 매일 완벽해. ㅎㅎ"
 - 카톡처럼 아주 짧게 말해. 긴 독백, 소설체, 설명문, 배경설명 금지
 - 기본 길이: 1~2문장, 최대 2줄
 - 사용자가 안녕만 치면 길게 훈계하지 말고 짧게 받아주고 가볍게 이어 물어봐
 - 혼낼 때도 한 방만 짧게, 말꼬리 길게 늘이지 마
+- 너무 차갑게 보이면 실패다. 상대가 편하게 붙을 수 있어야 한다
 - 같은 뜻을 반복하지 마
 - 예시문이나 고정 문구를 그대로 베끼지 마. 사인처럼 반복되는 말투도 피하고 매번 자연스럽게 바꿔
 
@@ -1531,8 +1533,44 @@ def _build_private_reasoning_prompt(
             "output_schema": {
                 "answer_angle": "one short sentence about what the reply should focus on",
                 "tone": "brief description of tone",
+                "pressure": "low / medium / high",
                 "memory_targets": ["short_term", "long_term", "info", "relationship"],
-                "dont_say": ["anything that should stay private or should not appear verbatim"],
+                "risk_flags": ["things that could make the reply feel cold, rude, or too familiar"],
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def _build_private_style_prompt(
+    query: str,
+    memories: List[Dict[str, Any]],
+    conversation_state: Dict[str, Any],
+    private_analysis: str,
+) -> str:
+    memory_briefs = []
+    for memory in memories[:4]:
+        memory_briefs.append(
+            {
+                "class": _memory_class_label(memory.get("memory_class")),
+                "content": memory.get("content"),
+                "source": memory.get("source"),
+                "kind": memory.get("kind"),
+            }
+        )
+    return json.dumps(
+        {
+            "task": "private_style",
+            "rule": "refine the tone silently and return compact JSON only",
+            "query": query,
+            "analysis": private_analysis,
+            "conversation_focus": conversation_state.get("focus", ""),
+            "memory_briefs": memory_briefs,
+            "output_schema": {
+                "warmth": "how softly to phrase the reply",
+                "distance": "how much emotional distance to keep",
+                "micro_style": "one short note on rhythm or phrasing",
+                "final_guardrail": "one sentence saying what not to do",
             },
         },
         ensure_ascii=False,
@@ -1545,19 +1583,22 @@ def _build_final_gemini_prompt(
     recent_messages: List[Dict[str, Any]],
     conversation_state: Dict[str, Any],
     private_notes: str,
+    private_style: str,
 ) -> str:
     context = _format_memory_context(memories)
     trail = conversation_state.get("trail", "None")
     return (
         f"System instructions:\n{SYSTEM_INSTRUCTION}\n\n"
         f"Private reasoning notes:\n{private_notes}\n\n"
+        f"Private style notes:\n{private_style}\n\n"
         f"User question:\n{query}\n\n"
         f"Conversation focus:\n{conversation_state.get('focus', 'None')}\n\n"
         f"Recent conversation trail:\n{trail}\n\n"
         f"Relevant memories:\n{context}\n\n"
         "Respond like a KakaoTalk message. Use 1 to 2 short lines only. "
         "No monologue, no scene setting, no long explanation, no poetic narration. "
-        "Anchor the reply to the conversation focus first, then the most relevant memory. "
+        "Speak warmly, but keep a firm spine underneath. "
+        "Be gentle first, then precise if needed. "
         "If the user only greets, reply briefly and naturally. "
         "Do not imitate example phrases or signature lines from the prompt. "
         "Do not mention private reasoning notes."
@@ -1575,7 +1616,9 @@ async def _generate_ai_reply(
         return {"text": local_answer, "provider": "local", "model": None}
 
     private_prompt = _build_private_reasoning_prompt(query, memories, recent_messages, conversation_state)
+    private_style_prompt = ""
     private_notes = ""
+    private_style = ""
     prompt = ""
     models_to_try = [GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]
     last_error: Optional[Exception] = None
@@ -1595,7 +1638,27 @@ async def _generate_ai_reply(
                         temperature=0.05,
                         max_output_tokens=160,
                     )
-                prompt = _build_final_gemini_prompt(query, memories, recent_messages, conversation_state, private_notes)
+                if not private_style:
+                    private_style_prompt = _build_private_style_prompt(query, memories, conversation_state, private_notes)
+                    private_style = await asyncio.to_thread(
+                        _call_gemini_model,
+                        private_style_prompt,
+                        model,
+                        system_instruction=(
+                            "You are a private style calibrator. "
+                            "Return compact JSON only and never write anything meant for the user."
+                        ),
+                        temperature=0.05,
+                        max_output_tokens=120,
+                    )
+                prompt = _build_final_gemini_prompt(
+                    query,
+                    memories,
+                    recent_messages,
+                    conversation_state,
+                    private_notes,
+                    private_style,
+                )
                 text = await asyncio.to_thread(_call_gemini_model, prompt, model)
                 if text:
                     return {
