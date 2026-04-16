@@ -34,6 +34,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY", "")
 GEMINI_API_KEY = GEMINI_API_KEY or os.getenv("GOOGLE_GENAI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+GEMINI_FALLBACK_MODELS = [
+    model.strip()
+    for model in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite").split(",")
+    if model.strip()
+]
 EMBED_DIM = 256
 DEFAULT_CHAT_CONVERSATION = "default"
 CHUNK_MAX_CHARS = 420
@@ -937,44 +942,64 @@ def _build_gemini_prompt(query: str, memories: List[Dict[str, Any]], recent_mess
     )
 
 
+def _is_retryable_gemini_error(exc: Exception) -> bool:
+    code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if code in {429, 500, 503, 504}:
+        return True
+    text = str(exc).lower()
+    return any(token in text for token in ["503", "unavailable", "overloaded", "deadline_exceeded", "resource_exhausted", "rate limit"])
+
+
+def _call_gemini_model(prompt: str, model: str) -> str:
+    if genai_types is None:
+        response = gemini_client.models.generate_content(model=model, contents=prompt)
+    else:
+        response = gemini_client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                temperature=0.4,
+                top_p=0.9,
+                max_output_tokens=512,
+            ),
+        )
+    text = getattr(response, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return ""
+
+
 async def _generate_ai_reply(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     local_answer = _compose_local_answer(query, memories, recent_messages)
     if not gemini_client:
         return {"text": local_answer, "provider": "local", "model": None}
 
     prompt = _build_gemini_prompt(query, memories, recent_messages)
+    models_to_try = [GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]
+    last_error: Optional[Exception] = None
 
-    def _call_gemini() -> str:
-        if genai_types is None:
-            response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-        else:
-            response = gemini_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    temperature=0.4,
-                    top_p=0.9,
-                    max_output_tokens=512,
-                ),
-            )
-        text = getattr(response, "text", None)
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-        return local_answer
+    for attempt, model in enumerate(models_to_try, start=1):
+        for retry in range(3):
+            try:
+                text = await asyncio.to_thread(_call_gemini_model, prompt, model)
+                if text:
+                    return {"text": text, "provider": "gemini", "model": model}
+                break
+            except Exception as exc:
+                last_error = exc
+                if not _is_retryable_gemini_error(exc):
+                    break
+                await asyncio.sleep(min(2.0 ** retry, 6.0))
 
-    try:
-        text = await asyncio.to_thread(_call_gemini)
-        return {
-            "text": text,
-            "provider": "gemini",
-            "model": GEMINI_MODEL,
-        }
-    except Exception as exc:
-        return {
-            "text": f"{local_answer}\n\n(제미나이 호출 실패로 로컬 폴백으로 답했습니다: {exc.__class__.__name__})",
-            "provider": "local-fallback",
-            "model": GEMINI_MODEL,
-        }
+        # If the primary model keeps failing with a retryable error, move to the next candidate.
+        continue
+
+    detail = f"{last_error.__class__.__name__}: {last_error}" if last_error else "unknown gemini failure"
+    return {
+        "text": f"{local_answer}\n\n(제미나이 호출 실패로 로컬 폴백으로 답했습니다: {detail})",
+        "provider": "local-fallback",
+        "model": GEMINI_MODEL,
+    }
 
 
 class MemoryCreateRequest(BaseModel):

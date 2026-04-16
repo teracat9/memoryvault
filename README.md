@@ -25,6 +25,7 @@ uvicorn app:app --host 127.0.0.1 --port 8123
 - `GOOGLE_API_KEY`: 동일 키를 넣어도 됩니다. 코드에서 둘 다 읽고, `GOOGLE_API_KEY`가 우선입니다.
 - `GOOGLE_GENAI_API_KEY`: 호환용으로 같이 읽습니다.
 - `GEMINI_MODEL`: `gemini-3.1-flash-lite-preview`
+- `GEMINI_FALLBACK_MODELS`: 기본값은 `gemini-2.5-flash,gemini-2.5-flash-lite`
 - `DATABASE_URL`: 외부 DB 연결 문자열. Render Postgres를 붙이면 자동으로 들어오는 값입니다.
 - `MEMORYVAULT_DB_PATH`: 로컬 SQLite 폴백용 경로. `DATABASE_URL`이 없을 때만 사용합니다.
 
