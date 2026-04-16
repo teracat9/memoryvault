@@ -1368,6 +1368,18 @@ def _format_recent_messages(messages: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _format_kst_compact(ts: Optional[datetime]) -> str:
+    if not ts:
+        return "none"
+    return ts.astimezone(KST).strftime("%Y-%m-%d %H:%M")
+
+
+def _minutes_between(later: Optional[datetime], earlier: Optional[datetime]) -> Optional[int]:
+    if not later or not earlier:
+        return None
+    return max(0, int((later - earlier).total_seconds() // 60))
+
+
 def _format_memory_context(memories: List[Dict[str, Any]]) -> str:
     if not memories:
         return "No relevant memories found."
@@ -1396,8 +1408,16 @@ def _extract_conversation_state(
     pending_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     pending_messages = pending_messages or []
+    now_utc = _utc_now()
+    now_kst = now_utc.astimezone(KST)
     last_user = next((msg for msg in reversed(recent_messages) if msg["role"] == "user"), None)
     last_assistant = next((msg for msg in reversed(recent_messages) if msg["role"] == "assistant"), None)
+    last_user_at = _parse_timestamp(last_user["created_at"]) if last_user and last_user.get("created_at") else None
+    last_assistant_at = _parse_timestamp(last_assistant["created_at"]) if last_assistant and last_assistant.get("created_at") else None
+    oldest_pending = pending_messages[0] if pending_messages else None
+    oldest_pending_at = _parse_timestamp(oldest_pending["created_at"]) if oldest_pending and oldest_pending.get("created_at") else None
+    latest_pending = pending_messages[-1] if pending_messages else None
+    latest_pending_at = _parse_timestamp(latest_pending["created_at"]) if latest_pending and latest_pending.get("created_at") else None
 
     trail = recent_messages[-CONTEXT_WINDOW_LIMIT:]
     pending_text = [msg["content"] for msg in pending_messages if msg.get("content")]
@@ -1410,12 +1430,44 @@ def _extract_conversation_state(
     if pending_text:
         focus_bits.append(f"pending={' | '.join(pending_text)}")
 
+    time_bits: List[str] = [
+        f"now_kst={now_kst.strftime('%Y-%m-%d %H:%M')}",
+        f"now_weekday={_weekday_name(now_kst)}",
+        f"now_hour_bucket={_hour_bucket(now_kst)}",
+    ]
+    if last_user_at:
+        time_bits.append(f"last_user_at={_format_kst_compact(last_user_at)}")
+        minutes = _minutes_between(now_utc, last_user_at)
+        if minutes is not None:
+            time_bits.append(f"minutes_since_last_user={minutes}")
+    if last_assistant_at:
+        time_bits.append(f"last_assistant_at={_format_kst_compact(last_assistant_at)}")
+        minutes = _minutes_between(now_utc, last_assistant_at)
+        if minutes is not None:
+            time_bits.append(f"minutes_since_last_assistant={minutes}")
+    if oldest_pending_at:
+        time_bits.append(f"oldest_pending_at={_format_kst_compact(oldest_pending_at)}")
+        minutes = _minutes_between(now_utc, oldest_pending_at)
+        if minutes is not None:
+            time_bits.append(f"minutes_since_oldest_pending={minutes}")
+    if latest_pending_at:
+        time_bits.append(f"latest_pending_at={_format_kst_compact(latest_pending_at)}")
+
     return {
         "focus": "\n".join(focus_bits),
         "trail": "\n".join(f"{msg['role']}: {msg['content']}" for msg in trail) if trail else "None",
         "last_user": last_user["content"] if last_user else "",
         "last_assistant": last_assistant["content"] if last_assistant else "",
         "pending": pending_text,
+        "now_kst": now_kst.strftime("%Y-%m-%d %H:%M"),
+        "time_context": "\n".join(time_bits),
+        "last_user_at": _format_kst_compact(last_user_at),
+        "last_assistant_at": _format_kst_compact(last_assistant_at),
+        "oldest_pending_at": _format_kst_compact(oldest_pending_at),
+        "latest_pending_at": _format_kst_compact(latest_pending_at),
+        "minutes_since_last_user": _minutes_between(now_utc, last_user_at),
+        "minutes_since_last_assistant": _minutes_between(now_utc, last_assistant_at),
+        "minutes_since_oldest_pending": _minutes_between(now_utc, oldest_pending_at),
     }
 
 
@@ -1453,8 +1505,10 @@ def _build_gemini_prompt(
     context = _format_memory_context(memories)
     focus = conversation_state.get("focus", "None")
     trail = conversation_state.get("trail", "None")
+    time_context = conversation_state.get("time_context", "None")
     return (
         f"System instructions:\n{SYSTEM_INSTRUCTION}\n\n"
+        f"Current time and message timing:\n{time_context}\n\n"
         f"User question:\n{query}\n\n"
         f"Conversation focus:\n{focus}\n\n"
         f"Recent conversation trail:\n{trail}\n\n"
@@ -1462,6 +1516,10 @@ def _build_gemini_prompt(
         "Respond like a KakaoTalk message. Use 1 to 2 short lines only. "
         "No monologue, no scene setting, no long explanation, no poetic narration. "
         "Anchor the reply to the conversation focus first, then the most relevant memory. "
+        "Use the exact current time and message timing to decide whether this is an immediate reply, "
+        "a delayed catch-up, or a follow-up to pending messages. "
+        "If the user's wording references '아까', '방금', '이따', '지금', or a prior message, "
+        "react to that timing explicitly. "
         "If the user only greets, reply briefly and naturally. "
         "Do not imitate example phrases or signature lines from the prompt."
     )
@@ -1528,6 +1586,7 @@ def _build_private_reasoning_prompt(
             "rule": "think silently and return compact JSON only",
             "query": query,
             "conversation_focus": conversation_state.get("focus", ""),
+            "time_context": conversation_state.get("time_context", ""),
             "recent_turns": recent_messages[-6:],
             "retrieved_memories": memory_briefs,
             "output_schema": {
@@ -1565,6 +1624,7 @@ def _build_private_style_prompt(
             "query": query,
             "analysis": private_analysis,
             "conversation_focus": conversation_state.get("focus", ""),
+            "time_context": conversation_state.get("time_context", ""),
             "memory_briefs": memory_briefs,
             "output_schema": {
                 "warmth": "how softly to phrase the reply",
@@ -1591,6 +1651,7 @@ def _build_final_gemini_prompt(
         f"System instructions:\n{SYSTEM_INSTRUCTION}\n\n"
         f"Private reasoning notes:\n{private_notes}\n\n"
         f"Private style notes:\n{private_style}\n\n"
+        f"Current time and message timing:\n{conversation_state.get('time_context', 'None')}\n\n"
         f"User question:\n{query}\n\n"
         f"Conversation focus:\n{conversation_state.get('focus', 'None')}\n\n"
         f"Recent conversation trail:\n{trail}\n\n"
@@ -1599,6 +1660,7 @@ def _build_final_gemini_prompt(
         "No monologue, no scene setting, no long explanation, no poetic narration. "
         "Speak warmly, but keep a firm spine underneath. "
         "Be gentle first, then precise if needed. "
+        "Use the timing context to decide whether to mention now, a delay, or a previously sent message. "
         "If the user only greets, reply briefly and naturally. "
         "Do not imitate example phrases or signature lines from the prompt. "
         "Do not mention private reasoning notes."
