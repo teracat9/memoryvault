@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import logging
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 DB_PATH = Path(os.getenv("MEMORYVAULT_DB_PATH", str(BASE_DIR / "memoryvault.db"))).expanduser()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = GEMINI_API_KEY or os.getenv("GOOGLE_GENAI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
 EMBED_DIM = 256
 DEFAULT_CHAT_CONVERSATION = "default"
@@ -47,9 +49,19 @@ app = FastAPI(title="Memory Vault")
 if FRONTEND_DIR.exists():
     app.mount("/frontend", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend")
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("memory-vault")
+
 db_lock: Optional[asyncio.Lock] = None
 pg_pool: Optional[asyncpg.Pool] = None
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if genai and GEMINI_API_KEY else None
+
+
+def _redact_secret(value: str) -> str:
+    value = value or ""
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}…{value[-4:]}"
 
 
 def _get_db_lock() -> asyncio.Lock:
@@ -990,6 +1002,20 @@ class ChatRequest(BaseModel):
 @app.on_event("startup")
 async def _startup() -> None:
     await init_db()
+    logger.info(
+        "ai_bootstrap provider=%s model=%s key_present=%s db=%s",
+        "gemini" if gemini_client else "local",
+        GEMINI_MODEL,
+        bool(GEMINI_API_KEY),
+        "postgres" if _using_postgres() else "sqlite",
+    )
+    if not gemini_client:
+        logger.warning(
+            "Gemini client disabled. Check Render env vars: GOOGLE_API_KEY=%s GEMINI_API_KEY=%s GOOGLE_GENAI_API_KEY=%s",
+            "set" if os.getenv("GOOGLE_API_KEY") else "missing",
+            "set" if os.getenv("GEMINI_API_KEY") else "missing",
+            "set" if os.getenv("GOOGLE_GENAI_API_KEY") else "missing",
+        )
 
 
 @app.get("/")
