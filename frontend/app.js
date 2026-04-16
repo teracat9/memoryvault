@@ -207,15 +207,24 @@ function renderChat(messages) {
     return;
   }
 
-  els.chatLog.innerHTML = messages.map((message) => `
-    <article class="chat-item ${escapeHtml(message.role)}">
-      <div class="role">${escapeHtml(message.role)}</div>
-      <p>${escapeHtml(message.content)}</p>
-      <div class="meta">
-        <span class="chip">${escapeHtml(formatTime(message.created_at))}</span>
-      </div>
-    </article>
-  `).join('');
+  els.chatLog.innerHTML = messages.map((message) => {
+    const mine = message.role === 'user';
+    const label = mine ? '태림아' : '도희';
+    return `
+      <article class="bubble-row ${mine ? 'mine' : 'other'}">
+        <div class="bubble-avatar">${mine ? 'T' : 'D'}</div>
+        <div class="bubble-stack">
+          <div class="bubble-name">${label}</div>
+          <div class="bubble ${mine ? 'mine' : 'other'}">${escapeHtml(message.content)}</div>
+          <div class="bubble-time">${escapeHtml(formatTime(message.created_at))}</div>
+        </div>
+      </article>
+    `;
+  }).join('');
+
+  requestAnimationFrame(() => {
+    els.chatLog.scrollTop = els.chatLog.scrollHeight;
+  });
 }
 
 async function loadBootstrap() {
