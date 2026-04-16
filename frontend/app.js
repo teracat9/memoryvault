@@ -209,7 +209,7 @@ function renderChat(messages) {
 
   els.chatLog.innerHTML = messages.map((message) => {
     const mine = message.role === 'user';
-    const label = mine ? '태림아' : '도희';
+    const label = mine ? '김태림' : '도희';
     return `
       <article class="bubble-row ${mine ? 'mine' : 'other'}">
         <div class="bubble-avatar">${mine ? 'T' : 'D'}</div>
