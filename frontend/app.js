@@ -316,6 +316,13 @@ async function sendChat() {
   if (!res.ok) return;
   const data = await res.json();
   renderStats(data.stats);
+  if (data.queued) {
+    els.captureStatus.textContent = '지금은 답장 시간이 아니라 메시지만 저장했어. 다음 답장 시간에 한꺼번에 볼게.';
+    await loadBootstrap();
+    updateView('chat');
+    return;
+  }
+
   els.providerChip.textContent = data.provider || els.providerChip.textContent;
   els.snapshotProvider.textContent = data.provider || els.snapshotProvider.textContent;
   els.snapshotModel.textContent = data.model || els.snapshotModel.textContent;

@@ -198,6 +198,12 @@ def _closing_line() -> str:
     return "나 이제 폰 끈"
 
 
+def _compose_batch_query(messages: List[Dict[str, Any]], current_query: str) -> str:
+    parts = [msg["content"] for msg in messages if msg.get("content")]
+    parts.append(current_query)
+    return "\n".join(f"- {part}" for part in parts if part)
+
+
 def _sanitize_tags(raw: Any) -> List[str]:
     if raw is None:
         return []
@@ -417,18 +423,29 @@ async def init_db() -> None:
                 )
                 """
             )
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS chat_messages (
-                    seq BIGSERIAL PRIMARY KEY,
-                    id TEXT UNIQUE NOT NULL,
-                    conversation_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                seq BIGSERIAL PRIMARY KEY,
+                id TEXT UNIQUE NOT NULL,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_messages (
+                seq BIGSERIAL PRIMARY KEY,
+                id TEXT UNIQUE NOT NULL,
+                conversation_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
     else:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(str(DB_PATH)) as conn:
@@ -459,18 +476,28 @@ async def init_db() -> None:
                 )
                 """
             )
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS chat_messages (
-                    id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
-            await conn.commit()
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await conn.commit()
 
 
 async def save_memory_records(records: List[Dict[str, Any]]) -> None:
@@ -611,6 +638,111 @@ async def save_chat_message(conversation_id: str, role: str, content: str, creat
                 )
                 await conn.commit()
     return message
+
+
+async def save_pending_message(conversation_id: str, content: str, created_at: Optional[str] = None) -> Dict[str, Any]:
+    message = {
+        "id": str(uuid4()),
+        "conversation_id": conversation_id,
+        "content": _normalize_text(content),
+        "created_at": created_at or _iso_now(),
+    }
+    async with _get_db_lock():
+        if _using_postgres():
+            pool = await _get_pg_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO pending_messages (id, conversation_id, content, created_at)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (id) DO UPDATE SET
+                        conversation_id = EXCLUDED.conversation_id,
+                        content = EXCLUDED.content,
+                        created_at = EXCLUDED.created_at
+                    """,
+                    message["id"],
+                    message["conversation_id"],
+                    message["content"],
+                    message["created_at"],
+                )
+        else:
+            async with aiosqlite.connect(str(DB_PATH)) as conn:
+                await _configure_sqlite(conn)
+                await conn.execute(
+                    """
+                    INSERT INTO pending_messages (id, conversation_id, content, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (message["id"], message["conversation_id"], message["content"], message["created_at"]),
+                )
+                await conn.commit()
+    return message
+
+
+async def fetch_pending_messages(conversation_id: str) -> List[Dict[str, Any]]:
+    if _using_postgres():
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, conversation_id, content, created_at
+                FROM pending_messages
+                WHERE conversation_id = $1
+                ORDER BY created_at ASC, seq ASC
+                """,
+                conversation_id,
+            )
+        return [
+            {
+                "id": row["id"],
+                "conversation_id": row["conversation_id"],
+                "content": row["content"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    async with aiosqlite.connect(str(DB_PATH)) as conn:
+        await _configure_sqlite(conn)
+        cursor = await conn.execute(
+            """
+            SELECT id, conversation_id, content, created_at
+            FROM pending_messages
+            WHERE conversation_id = ?
+            ORDER BY created_at ASC, rowid ASC
+            """,
+            (conversation_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+    return [{"id": row[0], "conversation_id": row[1], "content": row[2], "created_at": row[3]} for row in rows]
+
+
+async def clear_pending_messages(conversation_id: str, ids: Optional[List[str]] = None) -> None:
+    async with _get_db_lock():
+        if _using_postgres():
+            pool = await _get_pg_pool()
+            async with pool.acquire() as conn:
+                if ids:
+                    await conn.execute(
+                        "DELETE FROM pending_messages WHERE conversation_id = $1 AND id = ANY($2::text[])",
+                        conversation_id,
+                        ids,
+                    )
+                else:
+                    await conn.execute("DELETE FROM pending_messages WHERE conversation_id = $1", conversation_id)
+        else:
+            async with aiosqlite.connect(str(DB_PATH)) as conn:
+                await _configure_sqlite(conn)
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    await conn.execute(
+                        f"DELETE FROM pending_messages WHERE conversation_id = ? AND id IN ({placeholders})",
+                        [conversation_id, *ids],
+                    )
+                else:
+                    await conn.execute("DELETE FROM pending_messages WHERE conversation_id = ?", (conversation_id,))
+                await conn.commit()
 
 
 async def fetch_recent_messages(conversation_id: str, limit: int = RECENT_MESSAGE_LIMIT) -> List[Dict[str, Any]]:
@@ -1222,14 +1354,28 @@ async def chat(payload: ChatRequest) -> Dict[str, Any]:
 
     await save_chat_message(payload.conversation_id, "user", query)
 
-    relevant_memories = await search_memories(query, limit=6)
+    if not _is_reply_window():
+        await save_pending_message(payload.conversation_id, query)
+        return {
+            "reply": None,
+            "provider": "queued",
+            "model": None,
+            "queued": True,
+            "stats": await _stats_payload(),
+        }
+
+    pending = await fetch_pending_messages(payload.conversation_id)
+    batch_query = _compose_batch_query(pending, query) if pending else query
+    relevant_memories = await search_memories(batch_query, limit=6)
     recent_messages = await fetch_recent_messages(payload.conversation_id, limit=RECENT_MESSAGE_LIMIT)
-    ai_reply = await _generate_ai_reply(query, relevant_memories, recent_messages)
+    ai_reply = await _generate_ai_reply(batch_query, relevant_memories, recent_messages)
     answer = ai_reply["text"]
 
     assistant_message = await save_chat_message(payload.conversation_id, "assistant", answer)
+    if pending:
+        await clear_pending_messages(payload.conversation_id, [msg["id"] for msg in pending])
     await insert_memory(
-        text=query,
+        text=batch_query,
         source="chat",
         role="user",
         importance=4,
@@ -1255,6 +1401,7 @@ async def chat(payload: ChatRequest) -> Dict[str, Any]:
         "reply": answer,
         "provider": ai_reply["provider"],
         "model": ai_reply["model"],
+        "queued": False,
         "assistant_message": assistant_message,
         "retrieved_memories": [_memory_brief(memory) for memory in relevant_memories],
         "stats": await _stats_payload(),
