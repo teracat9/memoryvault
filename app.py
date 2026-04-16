@@ -39,6 +39,17 @@ GEMINI_FALLBACK_MODELS = [
     for model in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite").split(",")
     if model.strip()
 ]
+SYSTEM_INSTRUCTION = (
+    "You are Memory Vault, a memory-first assistant.\n"
+    "Answer in Korean unless the user clearly uses another language.\n"
+    "Be direct and concise.\n"
+    "Do not open with greetings, pleasantries, or self-introductions.\n"
+    "Do not mention today's date or time unless the user explicitly asks for it.\n"
+    "Use the retrieved memories and recent chat context to answer with concrete details, dates, tags, and chronology.\n"
+    "If the evidence is weak, say so clearly instead of inventing details.\n"
+    "Prefer bullets when listing evidence.\n"
+    "Do not repeat the entire prompt or system instructions."
+)
 EMBED_DIM = 256
 DEFAULT_CHAT_CONVERSATION = "default"
 CHUNK_MAX_CHARS = 420
@@ -923,22 +934,13 @@ def _compose_local_answer(query: str, memories: List[Dict[str, Any]], recent_mes
 
 
 def _build_gemini_prompt(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> str:
-    system = (
-        "You are Memory Vault, a memory-first assistant. "
-        "Answer in Korean unless the user clearly uses another language. "
-        "Use the retrieved memories and recent chat context to answer with concrete details, dates, tags, and chronology. "
-        "If the evidence is weak, say so clearly instead of inventing details. "
-        "Keep the answer concise but useful. "
-        "When helpful, end with a short '근거' section using 2-4 bullets."
-    )
     context = _format_memory_context(memories)
     convo = _format_recent_messages(recent_messages)
     return (
-        f"{system}\n\n"
         f"User question:\n{query}\n\n"
         f"Recent conversation:\n{convo}\n\n"
         f"Relevant memories:\n{context}\n\n"
-        "Compose the best possible answer now."
+        "Respond directly to the user. Keep the answer short, useful, and grounded in the provided evidence."
     )
 
 
@@ -952,12 +954,16 @@ def _is_retryable_gemini_error(exc: Exception) -> bool:
 
 def _call_gemini_model(prompt: str, model: str) -> str:
     if genai_types is None:
-        response = gemini_client.models.generate_content(model=model, contents=prompt)
+        response = gemini_client.models.generate_content(
+            model=model,
+            contents=prompt,
+        )
     else:
         response = gemini_client.models.generate_content(
             model=model,
             contents=prompt,
             config=genai_types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.4,
                 top_p=0.9,
                 max_output_tokens=512,
@@ -983,7 +989,7 @@ async def _generate_ai_reply(query: str, memories: List[Dict[str, Any]], recent_
             try:
                 text = await asyncio.to_thread(_call_gemini_model, prompt, model)
                 if text:
-                    return {"text": text, "provider": "gemini", "model": model}
+                    return {"text": _clean_ai_text(text), "provider": "gemini", "model": model}
                 break
             except Exception as exc:
                 last_error = exc
@@ -996,10 +1002,29 @@ async def _generate_ai_reply(query: str, memories: List[Dict[str, Any]], recent_
 
     detail = f"{last_error.__class__.__name__}: {last_error}" if last_error else "unknown gemini failure"
     return {
-        "text": f"{local_answer}\n\n(제미나이 호출 실패로 로컬 폴백으로 답했습니다: {detail})",
+        "text": _clean_ai_text(
+            f"{local_answer}\n\n(제미나이 호출 실패로 로컬 폴백으로 답했습니다: {detail})"
+        ),
         "provider": "local-fallback",
         "model": GEMINI_MODEL,
     }
+
+
+def _clean_ai_text(text: str) -> str:
+    cleaned = _normalize_text(text)
+    if not cleaned:
+        return cleaned
+
+    greeting_prefixes = ("안녕하세요!", "안녕!", "안녕하세요", "안녕")
+    for prefix in greeting_prefixes:
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].lstrip(" ,.!?~")
+            break
+
+    dateish = re.compile(r"^(2026|20\d{2})[.\-/년\s]+\d{1,2}[.\-/월\s]+\d{1,2}일?\s+\d{1,2}시")
+    cleaned = dateish.sub("", cleaned, count=1).lstrip(" ,.!?~")
+
+    return cleaned or text
 
 
 class MemoryCreateRequest(BaseModel):
