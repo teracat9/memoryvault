@@ -718,6 +718,27 @@ async def fetch_pending_messages(conversation_id: str) -> List[Dict[str, Any]]:
     return [{"id": row[0], "conversation_id": row[1], "content": row[2], "created_at": row[3]} for row in rows]
 
 
+async def count_pending_messages(conversation_id: str) -> int:
+    if _using_postgres():
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) AS pending_count FROM pending_messages WHERE conversation_id = $1",
+                conversation_id,
+            )
+        return int(row["pending_count"] or 0) if row else 0
+
+    async with aiosqlite.connect(str(DB_PATH)) as conn:
+        await _configure_sqlite(conn)
+        cursor = await conn.execute(
+            "SELECT COUNT(*) FROM pending_messages WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+    return int(row[0] or 0) if row else 0
+
+
 async def clear_pending_messages(conversation_id: str, ids: Optional[List[str]] = None) -> None:
     async with _get_db_lock():
         if _using_postgres():
@@ -1272,6 +1293,8 @@ async def health() -> Dict[str, Any]:
 async def bootstrap() -> Dict[str, Any]:
     memories = await fetch_memories(limit=60)
     recent_messages = await fetch_recent_messages(DEFAULT_CHAT_CONVERSATION, limit=12)
+    pending_messages = await fetch_pending_messages(DEFAULT_CHAT_CONVERSATION)
+    pending_count = await count_pending_messages(DEFAULT_CHAT_CONVERSATION)
     return {
         "stats": await _stats_payload(),
         "ai": {
@@ -1279,6 +1302,8 @@ async def bootstrap() -> Dict[str, Any]:
             "model": GEMINI_MODEL,
             "ready": bool(gemini_client),
         },
+        "pending_count": pending_count,
+        "pending_messages": pending_messages,
         "recent_memories": [_memory_brief(memory) for memory in memories],
         "recent_messages": recent_messages,
         "conversation_id": DEFAULT_CHAT_CONVERSATION,
@@ -1345,19 +1370,28 @@ async def chat(payload: ChatRequest) -> Dict[str, Any]:
     if not query:
         raise HTTPException(status_code=400, detail="message is required")
 
-    await save_chat_message(payload.conversation_id, "user", query)
+    message_timestamp = _iso_now()
+    await save_chat_message(payload.conversation_id, "user", query, created_at=message_timestamp)
 
     if not _is_reply_window():
-        await save_pending_message(payload.conversation_id, query)
+        await save_pending_message(payload.conversation_id, query, created_at=message_timestamp)
         return {
             "reply": None,
             "provider": "queued",
             "model": None,
             "queued": True,
+            "pending_count": await count_pending_messages(payload.conversation_id),
             "stats": await _stats_payload(),
         }
 
     pending = await fetch_pending_messages(payload.conversation_id)
+    for pending_message in pending:
+        await save_chat_message(
+            payload.conversation_id,
+            "user",
+            pending_message["content"],
+            created_at=pending_message["created_at"],
+        )
     batch_query = _compose_batch_query(pending, query) if pending else query
     relevant_memories = await search_memories(batch_query, limit=6)
     recent_messages = await fetch_recent_messages(payload.conversation_id, limit=RECENT_MESSAGE_LIMIT)
@@ -1395,6 +1429,7 @@ async def chat(payload: ChatRequest) -> Dict[str, Any]:
         "provider": ai_reply["provider"],
         "model": ai_reply["model"],
         "queued": False,
+        "pending_count": await count_pending_messages(payload.conversation_id),
         "assistant_message": assistant_message,
         "retrieved_memories": [_memory_brief(memory) for memory in relevant_memories],
         "stats": await _stats_payload(),

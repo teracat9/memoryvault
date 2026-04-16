@@ -40,6 +40,7 @@ const els = {
   chatInput: $('chatInput'),
   sendChat: $('sendChat'),
   ledgerList: $('ledgerList'),
+  pendingBadge: $('pendingBadge'),
 };
 
 const viewMeta = {
@@ -109,6 +110,31 @@ function renderStats(stats) {
   const lastSaved = formatTime(stats?.last_saved_at);
   els.lastSavedChip.textContent = `last saved ${lastSaved}`;
   els.snapshotSaved.textContent = lastSaved;
+}
+
+function renderPendingBadge(count) {
+  const hasPending = Number(count || 0) > 0;
+  if (!els.pendingBadge) return;
+  els.pendingBadge.hidden = !hasPending;
+  els.pendingBadge.textContent = hasPending ? '1' : '';
+}
+
+function mergeConversation(recentMessages = [], pendingMessages = [], extraMessages = []) {
+  const messages = [
+    ...recentMessages.map((message) => ({ ...message, pending: false })),
+    ...pendingMessages.map((message) => ({ ...message, role: 'user', pending: true })),
+    ...extraMessages,
+  ];
+  const seen = new Set();
+  const deduped = [];
+  for (const message of messages) {
+    const signature = `${message.role || 'user'}|${message.content || ''}|${message.created_at || ''}`;
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    deduped.push(message);
+  }
+  deduped.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  return deduped;
 }
 
 function renderAI(ai) {
@@ -215,7 +241,7 @@ function renderChat(messages) {
         <div class="bubble-avatar">${mine ? 'T' : 'D'}</div>
         <div class="bubble-stack">
           <div class="bubble-name">${label}</div>
-          <div class="bubble ${mine ? 'mine' : 'other'}">${escapeHtml(message.content)}</div>
+          <div class="bubble ${mine ? 'mine' : 'other'} ${message.pending ? 'pending' : ''}">${escapeHtml(message.content)}</div>
           <div class="bubble-time">${escapeHtml(formatTime(message.created_at))}</div>
         </div>
       </article>
@@ -236,9 +262,10 @@ async function loadBootstrap() {
   state.conversationId = state.bootstrap.conversation_id || 'default';
   renderStats(state.bootstrap.stats);
   renderAI(state.bootstrap.ai);
+  renderPendingBadge(state.bootstrap.pending_count);
   renderRecentFeed(state.bootstrap.recent_memories);
   renderLedger(state.bootstrap.recent_memories);
-  renderChat(state.bootstrap.recent_messages);
+  renderChat(mergeConversation(state.bootstrap.recent_messages, state.bootstrap.pending_messages || []));
 }
 
 function applySample() {
@@ -311,6 +338,17 @@ async function sendChat() {
   const message = els.chatInput.value.trim();
   if (!message) return;
 
+  const optimistic = {
+    role: 'user',
+    content: message,
+    created_at: new Date().toISOString(),
+    pending: true,
+  };
+  renderChat(mergeConversation(
+    state.bootstrap?.recent_messages || [],
+    state.bootstrap?.pending_messages || [],
+    [optimistic],
+  ));
   els.chatInput.value = '';
   const res = await fetch('/api/chat', {
     method: 'POST',
@@ -325,6 +363,7 @@ async function sendChat() {
   if (!res.ok) return;
   const data = await res.json();
   renderStats(data.stats);
+  renderPendingBadge(data.pending_count);
   if (data.queued) {
     els.captureStatus.textContent = '지금은 답장 시간이 아니라 메시지만 저장했어. 다음 답장 시간에 한꺼번에 볼게.';
     await loadBootstrap();

@@ -738,6 +738,21 @@ body::before {
   color: #2b2410;
 }
 
+.tab-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ff3b30;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  font-family: 'IBM Plex Mono', monospace;
+}
+
 .workspace {
   grid-template-columns: minmax(0, 1fr) 280px;
 }
@@ -848,6 +863,10 @@ body::before {
 .bubble-time {
   font-size: 11px;
   font-family: 'IBM Plex Mono', monospace;
+}
+
+.bubble.pending {
+  opacity: 0.72;
 }
 
 .composer {
