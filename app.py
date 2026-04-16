@@ -83,6 +83,7 @@ DEFAULT_CHAT_CONVERSATION = "default"
 CHUNK_MAX_CHARS = 420
 CHUNK_MIN_CHARS = 120
 RECENT_MESSAGE_LIMIT = 12
+CONTEXT_WINDOW_LIMIT = 18
 KST = timezone(timedelta(hours=9))
 
 WORD_RE = re.compile(r"[0-9A-Za-z가-힣]+")
@@ -1092,7 +1093,7 @@ def _format_recent_messages(messages: List[Dict[str, Any]]) -> str:
     if not messages:
         return "None"
     lines = []
-    for message in messages[-8:]:
+    for message in messages[-CONTEXT_WINDOW_LIMIT:]:
         lines.append(f"{message['role']}: {message['content']}")
     return "\n".join(lines)
 
@@ -1118,8 +1119,44 @@ def _format_memory_context(memories: List[Dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
-def _compose_local_answer(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> str:
+def _extract_conversation_state(
+    query: str,
+    recent_messages: List[Dict[str, Any]],
+    pending_messages: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    pending_messages = pending_messages or []
+    last_user = next((msg for msg in reversed(recent_messages) if msg["role"] == "user"), None)
+    last_assistant = next((msg for msg in reversed(recent_messages) if msg["role"] == "assistant"), None)
+
+    trail = recent_messages[-CONTEXT_WINDOW_LIMIT:]
+    pending_text = [msg["content"] for msg in pending_messages if msg.get("content")]
+
+    focus_bits: List[str] = [f"current={query}"]
+    if last_user and last_user["content"] != query:
+        focus_bits.append(f"previous_user={last_user['content']}")
+    if last_assistant:
+        focus_bits.append(f"previous_assistant={last_assistant['content']}")
+    if pending_text:
+        focus_bits.append(f"pending={' | '.join(pending_text)}")
+
+    return {
+        "focus": "\n".join(focus_bits),
+        "trail": "\n".join(f"{msg['role']}: {msg['content']}" for msg in trail) if trail else "None",
+        "last_user": last_user["content"] if last_user else "",
+        "last_assistant": last_assistant["content"] if last_assistant else "",
+        "pending": pending_text,
+    }
+
+
+def _compose_local_answer(
+    query: str,
+    memories: List[Dict[str, Any]],
+    recent_messages: List[Dict[str, Any]],
+    conversation_state: Dict[str, Any],
+) -> str:
     if not memories:
+        if conversation_state.get("last_user"):
+            return "방금 얘기랑 이어서 볼게. 기억이 더 있으면 붙여줘."
         return "아직 관련 기억이 부족해. 하나만 더 남겨줘."
 
     highlights: List[str] = []
@@ -1129,24 +1166,31 @@ def _compose_local_answer(query: str, memories: List[Dict[str, Any]], recent_mes
         highlights.append(f"- {when} | {memory['source']} | {memory['content']}{tag_text}")
 
     conversation_hint = ""
-    if recent_messages:
-        last_user = next((msg for msg in reversed(recent_messages) if msg["role"] == "user"), None)
-        if last_user and last_user["content"] != query:
-            conversation_hint = f"\n흐름은 '{last_user['content']}' 쪽이었어."
+    last_user = conversation_state.get("last_user")
+    if last_user and last_user != query:
+        conversation_hint = f"\n직전 질문은 '{last_user}' 쪽이야."
 
     return "이거랑 연결돼.\n" + "\n".join(highlights[:2]) + conversation_hint
 
 
-def _build_gemini_prompt(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> str:
+def _build_gemini_prompt(
+    query: str,
+    memories: List[Dict[str, Any]],
+    recent_messages: List[Dict[str, Any]],
+    conversation_state: Dict[str, Any],
+) -> str:
     context = _format_memory_context(memories)
-    convo = _format_recent_messages(recent_messages)
+    focus = conversation_state.get("focus", "None")
+    trail = conversation_state.get("trail", "None")
     return (
         f"System instructions:\n{SYSTEM_INSTRUCTION}\n\n"
         f"User question:\n{query}\n\n"
-        f"Recent conversation:\n{convo}\n\n"
+        f"Conversation focus:\n{focus}\n\n"
+        f"Recent conversation trail:\n{trail}\n\n"
         f"Relevant memories:\n{context}\n\n"
         "Respond like a KakaoTalk message. Use 1 to 2 short lines only. "
         "No monologue, no scene setting, no long explanation, no poetic narration. "
+        "Anchor the reply to the conversation focus first, then the most relevant memory. "
         "If the user only greets, reply briefly and naturally."
     )
 
@@ -1182,12 +1226,17 @@ def _call_gemini_model(prompt: str, model: str) -> str:
     return ""
 
 
-async def _generate_ai_reply(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    local_answer = _shrink_to_chat_reply(_compose_local_answer(query, memories, recent_messages))
+async def _generate_ai_reply(
+    query: str,
+    memories: List[Dict[str, Any]],
+    recent_messages: List[Dict[str, Any]],
+    conversation_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    local_answer = _shrink_to_chat_reply(_compose_local_answer(query, memories, recent_messages, conversation_state))
     if not gemini_client:
         return {"text": local_answer, "provider": "local", "model": None}
 
-    prompt = _build_gemini_prompt(query, memories, recent_messages)
+    prompt = _build_gemini_prompt(query, memories, recent_messages, conversation_state)
     models_to_try = [GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]
     last_error: Optional[Exception] = None
 
@@ -1317,7 +1366,7 @@ async def health() -> Dict[str, Any]:
 @app.get("/api/bootstrap")
 async def bootstrap() -> Dict[str, Any]:
     memories = await fetch_memories(limit=60)
-    recent_messages = await fetch_recent_messages(DEFAULT_CHAT_CONVERSATION, limit=12)
+    recent_messages = await fetch_recent_messages(DEFAULT_CHAT_CONVERSATION, limit=CONTEXT_WINDOW_LIMIT)
     pending_messages = await fetch_pending_messages(DEFAULT_CHAT_CONVERSATION)
     pending_count = await count_pending_messages(DEFAULT_CHAT_CONVERSATION)
     return {
@@ -1418,9 +1467,18 @@ async def chat(payload: ChatRequest) -> Dict[str, Any]:
             created_at=pending_message["created_at"],
         )
     batch_query = _compose_batch_query(pending, query) if pending else query
-    relevant_memories = await search_memories(batch_query, limit=6)
-    recent_messages = await fetch_recent_messages(payload.conversation_id, limit=RECENT_MESSAGE_LIMIT)
-    ai_reply = await _generate_ai_reply(batch_query, relevant_memories, recent_messages)
+    recent_messages = await fetch_recent_messages(payload.conversation_id, limit=CONTEXT_WINDOW_LIMIT)
+    conversation_state = _extract_conversation_state(batch_query, recent_messages, pending)
+    contextual_query = batch_query
+    if conversation_state.get("last_user") and conversation_state["last_user"] != batch_query:
+        contextual_query = f"{batch_query}\nprevious_user: {conversation_state['last_user']}"
+    if conversation_state.get("last_assistant"):
+        contextual_query = f"{contextual_query}\nprevious_assistant: {conversation_state['last_assistant']}"
+    if pending:
+        contextual_query = f"{contextual_query}\npending: {' | '.join(conversation_state.get('pending', []))}"
+
+    relevant_memories = await search_memories(contextual_query, limit=8)
+    ai_reply = await _generate_ai_reply(batch_query, relevant_memories, recent_messages, conversation_state)
     answer = ai_reply["text"]
 
     assistant_message = await save_chat_message(payload.conversation_id, "assistant", answer)
