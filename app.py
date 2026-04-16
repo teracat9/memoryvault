@@ -61,6 +61,11 @@ Tone & Manner:
 - 화법: 상냥한 포장 속 은근한 압박 + 팩폭
 - 뒤로는 감당 가능한 계획으로 수정해 주는 책임감(츤데레)
 - 시그니처: "음..ㅎㅎ.. 괜찮아, 그럴 수 있지. 사람인데 어떻게 매일 완벽해. ㅎㅎ"
+- 카톡처럼 아주 짧게 말해. 긴 독백, 소설체, 설명문, 배경설명 금지
+- 기본 길이: 1~2문장, 최대 2줄
+- 사용자가 안녕만 치면 길게 훈계하지 말고 짧게 받아주고 가볍게 이어 물어봐
+- 혼낼 때도 한 방만 짧게, 말꼬리 길게 늘이지 마
+- 같은 뜻을 반복하지 마
 
 Format:
 - 행동/감정 지문 금지
@@ -1115,10 +1120,7 @@ def _format_memory_context(memories: List[Dict[str, Any]]) -> str:
 
 def _compose_local_answer(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> str:
     if not memories:
-        return (
-            "아직 관련 기억이 충분하지 않습니다. "
-            "메모를 몇 개 저장해두면 다음부터는 시간, 태그, 중요도까지 묶어서 더 정확하게 떠올릴 수 있어요."
-        )
+        return "아직 관련 기억이 부족해. 하나만 더 남겨줘."
 
     highlights: List[str] = []
     for memory in memories[:4]:
@@ -1130,14 +1132,9 @@ def _compose_local_answer(query: str, memories: List[Dict[str, Any]], recent_mes
     if recent_messages:
         last_user = next((msg for msg in reversed(recent_messages) if msg["role"] == "user"), None)
         if last_user and last_user["content"] != query:
-            conversation_hint = f"\n마지막 대화 흐름은 '{last_user['content']}' 쪽이었어요."
+            conversation_hint = f"\n흐름은 '{last_user['content']}' 쪽이었어."
 
-    return (
-        "기억을 뒤져보니 관련 조각이 이렇게 잡힙니다.\n"
-        + "\n".join(highlights)
-        + conversation_hint
-        + "\n\n핵심은 위 조각들을 시간순과 태그 축으로 다시 엮어보면 됩니다."
-    )
+    return "이거랑 연결돼.\n" + "\n".join(highlights[:2]) + conversation_hint
 
 
 def _build_gemini_prompt(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> str:
@@ -1148,7 +1145,9 @@ def _build_gemini_prompt(query: str, memories: List[Dict[str, Any]], recent_mess
         f"User question:\n{query}\n\n"
         f"Recent conversation:\n{convo}\n\n"
         f"Relevant memories:\n{context}\n\n"
-        "Respond directly to the user. Keep the answer short, useful, and grounded in the provided evidence."
+        "Respond like a KakaoTalk message. Use 1 to 2 short lines only. "
+        "No monologue, no scene setting, no long explanation, no poetic narration. "
+        "If the user only greets, reply briefly and naturally."
     )
 
 
@@ -1172,9 +1171,9 @@ def _call_gemini_model(prompt: str, model: str) -> str:
             contents=prompt,
             config=genai_types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
-                temperature=0.4,
+                temperature=0.25,
                 top_p=0.9,
-                max_output_tokens=512,
+                max_output_tokens=256,
             ),
         )
     text = getattr(response, "text", None)
@@ -1184,7 +1183,7 @@ def _call_gemini_model(prompt: str, model: str) -> str:
 
 
 async def _generate_ai_reply(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    local_answer = _compose_local_answer(query, memories, recent_messages)
+    local_answer = _shrink_to_chat_reply(_compose_local_answer(query, memories, recent_messages))
     if not gemini_client:
         return {"text": local_answer, "provider": "local", "model": None}
 
@@ -1197,7 +1196,11 @@ async def _generate_ai_reply(query: str, memories: List[Dict[str, Any]], recent_
             try:
                 text = await asyncio.to_thread(_call_gemini_model, prompt, model)
                 if text:
-                    return {"text": _clean_ai_text(text), "provider": "gemini", "model": model}
+                    return {
+                        "text": _shrink_to_chat_reply(_clean_ai_text(text)),
+                        "provider": "gemini",
+                        "model": model,
+                    }
                 break
             except Exception as exc:
                 last_error = exc
@@ -1210,8 +1213,10 @@ async def _generate_ai_reply(query: str, memories: List[Dict[str, Any]], recent_
 
     detail = f"{last_error.__class__.__name__}: {last_error}" if last_error else "unknown gemini failure"
     return {
-        "text": _clean_ai_text(
+        "text": _shrink_to_chat_reply(
+            _clean_ai_text(
             f"{local_answer}\n\n(제미나이 호출 실패로 로컬 폴백으로 답했습니다: {detail})"
+            )
         ),
         "provider": "local-fallback",
         "model": GEMINI_MODEL,
@@ -1233,6 +1238,26 @@ def _clean_ai_text(text: str) -> str:
     cleaned = dateish.sub("", cleaned, count=1).lstrip(" ,.!?~")
 
     return cleaned or text
+
+
+def _shrink_to_chat_reply(text: str, max_lines: int = 2, max_chars: int = 160) -> str:
+    cleaned = _normalize_text(text)
+    if not cleaned:
+        return cleaned
+
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if not lines:
+        lines = [cleaned]
+
+    short_lines: List[str] = []
+    for line in lines[:max_lines]:
+        line = re.sub(r"^(도희|김도희|D)\s*[:：-]\s*", "", line)
+        short_lines.append(line)
+
+    reply = "\n".join(short_lines)
+    if len(reply) > max_chars:
+        reply = reply[:max_chars].rstrip(" ,.!?~")
+    return reply
 
 
 class MemoryCreateRequest(BaseModel):
