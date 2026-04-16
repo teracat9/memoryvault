@@ -423,29 +423,29 @@ async def init_db() -> None:
                 )
                 """
             )
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                seq BIGSERIAL PRIMARY KEY,
-                id TEXT UNIQUE NOT NULL,
-                conversation_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    seq BIGSERIAL PRIMARY KEY,
+                    id TEXT UNIQUE NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pending_messages (
-                seq BIGSERIAL PRIMARY KEY,
-                id TEXT UNIQUE NOT NULL,
-                conversation_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_messages (
+                    seq BIGSERIAL PRIMARY KEY,
+                    id TEXT UNIQUE NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
     else:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(str(DB_PATH)) as conn:
