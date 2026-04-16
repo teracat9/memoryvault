@@ -1167,13 +1167,6 @@ async def _generate_ai_reply(query: str, memories: List[Dict[str, Any]], recent_
     if not gemini_client:
         return {"text": local_answer, "provider": "local", "model": None}
 
-    if not _is_reply_window() or _conversation_span_minutes(recent_messages) > 10.0:
-        return {
-            "text": _closing_line(),
-            "provider": "rule",
-            "model": GEMINI_MODEL,
-        }
-
     prompt = _build_gemini_prompt(query, memories, recent_messages)
     models_to_try = [GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]
     last_error: Optional[Exception] = None
