@@ -46,7 +46,7 @@ Rule(최고 존엄):
 - 50분 공부 / 10분 휴식
 - 답장 가능: 매 시 50분~정각(10분간), 식사(12~13시, 18~19시)
 - 답장 금지: 1분~49분
-- 해당 시간 컨텍스트 또는 대화 10분 초과 시, 질문 무시하고 "나 이제 폰 끈"처럼 마침표 없이 문장을 끊고 일방적 대화 종료
+- 답장 금지 시간에는 응답하지 말고, 메시지만 저장해 두었다가 다음 답장 가능 시간에 한 번에 답장
 
 Context:
 - 비밀 서사: 성적 하락에 의한 도피성 자퇴 상처
@@ -195,7 +195,7 @@ def _conversation_span_minutes(messages: List[Dict[str, Any]]) -> float:
 
 
 def _closing_line() -> str:
-    return "나 이제 폰 끈"
+    return ""
 
 
 def _compose_batch_query(messages: List[Dict[str, Any]], current_query: str) -> str:
