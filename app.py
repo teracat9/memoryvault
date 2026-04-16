@@ -85,6 +85,82 @@ CHUNK_MIN_CHARS = 120
 RECENT_MESSAGE_LIMIT = 12
 CONTEXT_WINDOW_LIMIT = 18
 KST = timezone(timedelta(hours=9))
+MEMORY_CLASS_LABELS = {
+    "short_term": "단기기억",
+    "long_term": "장기기억",
+    "info": "정보기억",
+    "relationship": "관계기억",
+}
+RELATIONSHIP_KEYWORDS = {
+    "연애",
+    "사랑",
+    "좋아해",
+    "싫어해",
+    "친구",
+    "우정",
+    "가족",
+    "엄마",
+    "아빠",
+    "형",
+    "누나",
+    "언니",
+    "오빠",
+    "동생",
+    "관계",
+    "사이",
+    "연락",
+    "대화",
+    "만남",
+    "태림",
+    "도희",
+}
+INFO_KEYWORDS = {
+    "정의",
+    "원리",
+    "개념",
+    "설명",
+    "방법",
+    "공식",
+    "이론",
+    "수능",
+    "과탐",
+    "수학",
+    "문제",
+    "노트",
+    "정리",
+    "학습",
+    "정보",
+    "참고",
+}
+LONG_TERM_KEYWORDS = {
+    "항상",
+    "늘",
+    "매번",
+    "언제나",
+    "습관",
+    "선호",
+    "좋아",
+    "싫어",
+    "기억해줘",
+    "잊지마",
+    "중요",
+}
+SHORT_TERM_KEYWORDS = {
+    "지금",
+    "오늘",
+    "방금",
+    "이번",
+    "잠깐",
+    "곧",
+    "할일",
+    "해야",
+    "일정",
+    "마감",
+    "스터디",
+    "과제",
+    "메모",
+    "체크",
+}
 
 WORD_RE = re.compile(r"[0-9A-Za-z가-힣]+")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+")
@@ -301,6 +377,7 @@ def _build_memory_text(
     importance: int,
     tags: List[str],
     kind: str,
+    memory_class: str,
     chunk_index: int,
     chunk_total: int,
     content: str,
@@ -315,6 +392,7 @@ def _build_memory_text(
         f"source: {source}",
         f"role: {role}",
         f"kind: {kind}",
+        f"memory_class: {memory_class}",
         f"importance: {importance}",
         f"chunk: {chunk_index + 1}/{max(chunk_total, 1)}",
         f"topic: {topic}",
@@ -392,10 +470,121 @@ def _query_time_hint(query: str) -> str:
     return ""
 
 
+def _query_memory_class_hint(query: str) -> Optional[str]:
+    q = _normalize_text(query).lower()
+    if any(token in q for token in ["누가", "사람", "관계", "친구", "가족", "연애", "연락", "도희", "태림"]):
+        return "relationship"
+    if any(token in q for token in ["계속", "항상", "습관", "선호", "좋아해", "싫어해", "장기", "오래", "내가 원하", "기억해줘"]):
+        return "long_term"
+    if any(token in q for token in ["정의", "설명", "개념", "원리", "방법", "공식", "수능", "과탐", "수학", "정보", "정리"]):
+        return "info"
+    if any(token in q for token in ["지금", "방금", "오늘", "이번", "잠깐", "해야", "할일", "일정", "메모", "단기"]):
+        return "short_term"
+    return None
+
+
+def _normalize_memory_class(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    normalized = _normalize_text(value).lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "단기": "short_term",
+        "단기기억": "short_term",
+        "short": "short_term",
+        "shortterm": "short_term",
+        "short_term": "short_term",
+        "장기": "long_term",
+        "장기기억": "long_term",
+        "long": "long_term",
+        "longterm": "long_term",
+        "long_term": "long_term",
+        "정보": "info",
+        "정보기억": "info",
+        "info": "info",
+        "관계": "relationship",
+        "관계기억": "relationship",
+        "relationship": "relationship",
+    }
+    return aliases.get(normalized)
+
+
+def _memory_class_label(value: Optional[str]) -> str:
+    normalized = _normalize_memory_class(value) or "info"
+    return MEMORY_CLASS_LABELS.get(normalized, "정보기억")
+
+
+def _classify_memory_class(
+    text: str,
+    *,
+    source: str = "note",
+    role: str = "user",
+    importance: int = 3,
+    tags: Optional[List[str]] = None,
+    topic: str = "",
+    kind: str = "note",
+) -> str:
+    tags = [tag.lower() for tag in (tags or [])]
+    blob = _normalize_text(" ".join([text, source, role, topic, " ".join(tags)])).lower()
+
+    if any(keyword.lower() in blob for keyword in RELATIONSHIP_KEYWORDS):
+        return "relationship"
+
+    if kind.endswith("_summary") and importance >= 4:
+        return "long_term"
+    if importance >= 4 and any(keyword in blob for keyword in LONG_TERM_KEYWORDS):
+        return "long_term"
+    if source in {"profile", "journal"} and importance >= 4:
+        return "long_term"
+
+    if any(keyword.lower() in blob for keyword in SHORT_TERM_KEYWORDS):
+        return "short_term"
+    if source in {"chat", "task"} or role == "assistant":
+        return "short_term"
+
+    if any(keyword.lower() in blob for keyword in INFO_KEYWORDS):
+        return "info"
+    if source in {"note", "journal", "article", "doc"}:
+        return "info"
+
+    if importance >= 4:
+        return "long_term"
+    return "info"
+
+
 async def _configure_sqlite(conn: aiosqlite.Connection) -> None:
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA synchronous=NORMAL")
     await conn.execute("PRAGMA busy_timeout=5000")
+
+
+async def _ensure_memory_class_column() -> None:
+    if _using_postgres():
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'memory_class'
+                ) AS has_column
+                """
+            )
+            has_column = bool(row["has_column"]) if row else False
+            if not has_column:
+                await conn.execute("ALTER TABLE memories ADD COLUMN memory_class TEXT NOT NULL DEFAULT 'info'")
+            await conn.execute("UPDATE memories SET memory_class = COALESCE(NULLIF(memory_class, ''), 'info')")
+    else:
+        async with aiosqlite.connect(str(DB_PATH)) as conn:
+            await _configure_sqlite(conn)
+            cursor = await conn.execute("PRAGMA table_info(memories)")
+            columns = await cursor.fetchall()
+            await cursor.close()
+            has_column = any((row[1] if len(row) > 1 else "") == "memory_class" for row in columns)
+            if not has_column:
+                await conn.execute("ALTER TABLE memories ADD COLUMN memory_class TEXT NOT NULL DEFAULT 'info'")
+            await conn.execute("UPDATE memories SET memory_class = COALESCE(NULLIF(memory_class, ''), 'info')")
+            await conn.commit()
 
 
 async def init_db() -> None:
@@ -409,6 +598,7 @@ async def init_db() -> None:
                     id TEXT UNIQUE NOT NULL,
                     entry_id TEXT NOT NULL,
                     kind TEXT NOT NULL,
+                    memory_class TEXT NOT NULL DEFAULT 'info',
                     source TEXT NOT NULL,
                     role TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -462,6 +652,7 @@ async def init_db() -> None:
                     id TEXT PRIMARY KEY,
                     entry_id TEXT NOT NULL,
                     kind TEXT NOT NULL,
+                    memory_class TEXT NOT NULL DEFAULT 'info',
                     source TEXT NOT NULL,
                     role TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -504,6 +695,7 @@ async def init_db() -> None:
             """
         )
         await conn.commit()
+    await _ensure_memory_class_column()
 
 
 async def save_memory_records(records: List[Dict[str, Any]]) -> None:
@@ -518,14 +710,15 @@ async def save_memory_records(records: List[Dict[str, Any]]) -> None:
                         await conn.execute(
                             """
                             INSERT INTO memories (
-                                id, entry_id, kind, source, role, created_at, day_key, week_key, hour_bucket,
+                                id, entry_id, kind, memory_class, source, role, created_at, day_key, week_key, hour_bucket,
                                 importance, tags_json, topic, chunk_index, chunk_total, content, memory_text,
                                 embedding_json, token_count, session_id, meta_json
                             )
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
                             ON CONFLICT (id) DO UPDATE SET
                                 entry_id = EXCLUDED.entry_id,
                                 kind = EXCLUDED.kind,
+                                memory_class = EXCLUDED.memory_class,
                                 source = EXCLUDED.source,
                                 role = EXCLUDED.role,
                                 created_at = EXCLUDED.created_at,
@@ -547,6 +740,7 @@ async def save_memory_records(records: List[Dict[str, Any]]) -> None:
                             record["id"],
                             record["entry_id"],
                             record["kind"],
+                            record["memory_class"],
                             record["source"],
                             record["role"],
                             record["created_at"],
@@ -572,16 +766,17 @@ async def save_memory_records(records: List[Dict[str, Any]]) -> None:
                     await conn.execute(
                         """
                         INSERT OR REPLACE INTO memories (
-                            id, entry_id, kind, source, role, created_at, day_key, week_key, hour_bucket,
+                            id, entry_id, kind, memory_class, source, role, created_at, day_key, week_key, hour_bucket,
                             importance, tags_json, topic, chunk_index, chunk_total, content, memory_text,
                             embedding_json, token_count, session_id, meta_json
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             record["id"],
                             record["entry_id"],
                             record["kind"],
+                            record["memory_class"],
                             record["source"],
                             record["role"],
                             record["created_at"],
@@ -830,6 +1025,7 @@ async def insert_memory(
     created_at: Optional[str] = None,
     conversation_id: Optional[str] = None,
     kind: str = "note",
+    memory_class: Optional[str] = None,
 ) -> Dict[str, Any]:
     text = _normalize_text(text)
     if not text:
@@ -842,6 +1038,15 @@ async def insert_memory(
     week_key = _week_key(ts)
     hour_bucket = _hour_bucket(ts)
     entry_id = str(uuid4())
+    memory_class = _normalize_memory_class(memory_class) or _classify_memory_class(
+        text,
+        source=source,
+        role=role,
+        importance=importance,
+        tags=tags,
+        topic=topic,
+        kind=kind,
+    )
     chunks = chunk_text(text)
     if not chunks:
         chunks = [text]
@@ -856,6 +1061,7 @@ async def insert_memory(
             importance=importance,
             tags=tags,
             kind=kind,
+            memory_class=memory_class,
             chunk_index=index,
             chunk_total=total,
             content=chunk,
@@ -866,6 +1072,7 @@ async def insert_memory(
                 "id": str(uuid4()),
                 "entry_id": entry_id,
                 "kind": kind,
+                "memory_class": memory_class,
                 "source": source,
                 "role": role,
                 "created_at": ts.isoformat(),
@@ -899,6 +1106,7 @@ async def insert_memory(
             importance=min(5, importance + 1),
             tags=tags,
             kind=f"{kind}_summary",
+            memory_class=memory_class,
             chunk_index=0,
             chunk_total=1,
             content=summary,
@@ -909,6 +1117,7 @@ async def insert_memory(
                 "id": str(uuid4()),
                 "entry_id": entry_id,
                 "kind": f"{kind}_summary",
+                "memory_class": memory_class,
                 "source": source,
                 "role": role,
                 "created_at": ts.isoformat(),
@@ -948,7 +1157,7 @@ async def fetch_memories(limit: int = 120) -> List[Dict[str, Any]]:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, entry_id, kind, source, role, created_at, day_key, week_key, hour_bucket,
+                SELECT id, entry_id, kind, memory_class, source, role, created_at, day_key, week_key, hour_bucket,
                        importance, tags_json, topic, chunk_index, chunk_total, content, memory_text,
                        embedding_json, token_count, session_id, meta_json
                 FROM memories
@@ -962,6 +1171,7 @@ async def fetch_memories(limit: int = 120) -> List[Dict[str, Any]]:
                 row["id"],
                 row["entry_id"],
                 row["kind"],
+                row["memory_class"],
                 row["source"],
                 row["role"],
                 row["created_at"],
@@ -987,7 +1197,7 @@ async def fetch_memories(limit: int = 120) -> List[Dict[str, Any]]:
             await _configure_sqlite(conn)
             cursor = await conn.execute(
                 """
-                SELECT id, entry_id, kind, source, role, created_at, day_key, week_key, hour_bucket,
+                SELECT id, entry_id, kind, memory_class, source, role, created_at, day_key, week_key, hour_bucket,
                        importance, tags_json, topic, chunk_index, chunk_total, content, memory_text,
                        embedding_json, token_count, session_id, meta_json
                 FROM memories
@@ -1006,23 +1216,24 @@ async def fetch_memories(limit: int = 120) -> List[Dict[str, Any]]:
                 "id": row[0],
                 "entry_id": row[1],
                 "kind": row[2],
-                "source": row[3],
-                "role": row[4],
-                "created_at": row[5],
-                "day_key": row[6],
-                "week_key": row[7],
-                "hour_bucket": row[8],
-                "importance": row[9],
-                "tags": json.loads(row[10] or "[]"),
-                "topic": row[11],
-                "chunk_index": row[12],
-                "chunk_total": row[13],
-                "content": row[14],
-                "memory_text": row[15],
-                "embedding": json.loads(row[16] or "[]"),
-                "token_count": row[17],
-                "session_id": row[18],
-                "meta": json.loads(row[19] or "{}"),
+                "memory_class": row[3],
+                "source": row[4],
+                "role": row[5],
+                "created_at": row[6],
+                "day_key": row[7],
+                "week_key": row[8],
+                "hour_bucket": row[9],
+                "importance": row[10],
+                "tags": json.loads(row[11] or "[]"),
+                "topic": row[12],
+                "chunk_index": row[13],
+                "chunk_total": row[14],
+                "content": row[15],
+                "memory_text": row[16],
+                "embedding": json.loads(row[17] or "[]"),
+                "token_count": row[18],
+                "session_id": row[19],
+                "meta": json.loads(row[20] or "{}"),
             }
         )
     return memories
@@ -1036,6 +1247,7 @@ async def search_memories(query: str, limit: int = 8) -> List[Dict[str, Any]]:
     q_embedding = embed_text(query)
     query_tags = {tag.lower() for tag in _sanitize_tags(re.findall(r"#([A-Za-z0-9가-힣_-]+)", query))}
     time_hint = _query_time_hint(query)
+    query_class_hint = _query_memory_class_hint(query)
     memories = await fetch_memories(limit=400)
 
     scored: List[Tuple[float, Dict[str, Any]]] = []
@@ -1047,6 +1259,8 @@ async def search_memories(query: str, limit: int = 8) -> List[Dict[str, Any]]:
 
         if time_hint and memory["hour_bucket"] == time_hint:
             score += 0.04
+        if query_class_hint and memory.get("memory_class") == query_class_hint:
+            score += 0.10
         if query_tags:
             memory_tags = {tag.lower() for tag in memory.get("tags", [])}
             if query_tags & memory_tags:
@@ -1071,6 +1285,7 @@ def _memory_brief(memory: Dict[str, Any]) -> Dict[str, Any]:
         "id": memory["id"],
         "entry_id": memory["entry_id"],
         "kind": memory["kind"],
+        "memory_class": memory.get("memory_class", "info"),
         "source": memory["source"],
         "role": memory["role"],
         "created_at": memory["created_at"],
@@ -1108,6 +1323,7 @@ def _format_memory_context(memories: List[Dict[str, Any]]) -> str:
             "\n".join(
                 [
                     f"[{index}] score={memory.get('score', 0)}",
+                    f"class={_memory_class_label(memory.get('memory_class'))}",
                     f"timestamp={memory['created_at']}",
                     f"source={memory['source']} role={memory['role']} kind={memory['kind']}",
                     f"day={memory['day_key']} week={memory['week_key']} bucket={memory['hour_bucket']}",
@@ -1318,6 +1534,7 @@ class MemoryCreateRequest(BaseModel):
     topic: str = Field(default="")
     session_id: str = Field(default="default")
     created_at: Optional[str] = None
+    memory_class: Optional[str] = Field(default=None)
 
 
 class SearchRequest(BaseModel):
@@ -1390,10 +1607,18 @@ async def _stats_payload() -> Dict[str, Any]:
         async with pool.acquire() as conn:
             row = await conn.fetchrow("SELECT COUNT(DISTINCT entry_id) AS memory_count, COUNT(*) AS chunk_count, MAX(created_at) AS last_saved_at FROM memories")
             chat_row = await conn.fetchrow("SELECT COUNT(*) AS chat_count FROM chat_messages")
+            class_rows = await conn.fetch(
+                """
+                SELECT COALESCE(NULLIF(memory_class, ''), 'info') AS memory_class, COUNT(*) AS count
+                FROM memories
+                GROUP BY COALESCE(NULLIF(memory_class, ''), 'info')
+                """
+            )
         memory_count = int(row["memory_count"] or 0) if row else 0
         chunk_count = int(row["chunk_count"] or 0) if row else 0
         last_saved_at = row["last_saved_at"] if row else None
         chat_count = int(chat_row["chat_count"] or 0) if chat_row else 0
+        memory_class_counts = {str(row["memory_class"]): int(row["count"] or 0) for row in class_rows}
     else:
         async with aiosqlite.connect(str(DB_PATH)) as conn:
             await _configure_sqlite(conn)
@@ -1403,16 +1628,27 @@ async def _stats_payload() -> Dict[str, Any]:
             cursor = await conn.execute("SELECT COUNT(*) FROM chat_messages")
             chat_row = await cursor.fetchone()
             await cursor.close()
+            cursor = await conn.execute(
+                """
+                SELECT COALESCE(NULLIF(memory_class, ''), 'info') AS memory_class, COUNT(*) AS count
+                FROM memories
+                GROUP BY COALESCE(NULLIF(memory_class, ''), 'info')
+                """
+            )
+            class_rows = await cursor.fetchall()
+            await cursor.close()
 
         memory_count = int(row[0] or 0)
         chunk_count = int(row[1] or 0)
         last_saved_at = row[2] or None
         chat_count = int(chat_row[0] or 0)
+        memory_class_counts = {str(row[0]): int(row[1] or 0) for row in class_rows}
     return {
         "memory_count": memory_count,
         "chunk_count": chunk_count,
         "chat_count": chat_count,
         "last_saved_at": last_saved_at,
+        "memory_class_counts": memory_class_counts,
     }
 
 
@@ -1428,6 +1664,7 @@ async def create_memory(payload: MemoryCreateRequest) -> Dict[str, Any]:
         session_id=payload.session_id,
         created_at=payload.created_at,
         kind="note",
+        memory_class=payload.memory_class,
     )
     return {"ok": True, **result, "stats": await _stats_payload()}
 

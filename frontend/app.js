@@ -19,6 +19,7 @@ const els = {
   snapshotModel: $('snapshotModel'),
   snapshotSaved: $('snapshotSaved'),
   snapshotReady: $('snapshotReady'),
+  memoryMix: $('memoryMix'),
   recentFeed: $('recentFeed'),
   stageTitle: $('stageTitle'),
   stageSubtitle: $('stageSubtitle'),
@@ -27,6 +28,7 @@ const els = {
   memorySource: $('memorySource'),
   memoryTopic: $('memoryTopic'),
   memoryImportance: $('memoryImportance'),
+  memoryClass: $('memoryClass'),
   importanceValue: $('importanceValue'),
   captureStatus: $('captureStatus'),
   saveMemory: $('saveMemory'),
@@ -61,6 +63,17 @@ const viewMeta = {
     subtitle: '메모를 타임라인처럼 훑어보며 다시 꺼냅니다.',
   },
 };
+
+const memoryClassLabels = {
+  short_term: '단기기억',
+  long_term: '장기기억',
+  info: '정보기억',
+  relationship: '관계기억',
+};
+
+function memoryClassLabel(value) {
+  return memoryClassLabels[String(value || 'info')] || '정보기억';
+}
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -110,6 +123,20 @@ function renderStats(stats) {
   const lastSaved = formatTime(stats?.last_saved_at);
   els.lastSavedChip.textContent = `last saved ${lastSaved}`;
   els.snapshotSaved.textContent = lastSaved;
+
+  const counts = stats?.memory_class_counts || {};
+  if (els.memoryMix) {
+    const ordered = ['short_term', 'long_term', 'info', 'relationship'];
+    els.memoryMix.innerHTML = ordered.map((key) => {
+      const value = Number(counts[key] || 0);
+      return `
+        <div class="mix-chip">
+          <span>${escapeHtml(memoryClassLabel(key))}</span>
+          <strong>${value}</strong>
+        </div>
+      `;
+    }).join('');
+  }
 }
 
 function renderPendingBadge(count) {
@@ -162,12 +189,13 @@ function renderRecentFeed(memories) {
       <article class="pulse-item">
         <div class="chat-top">
           <span>${escapeHtml(memory.day_key)} · ${escapeHtml(memory.hour_bucket)}</span>
-          <span class="chip">I${memory.importance}</span>
+          <span class="chip">${escapeHtml(memoryClassLabel(memory.memory_class))}</span>
         </div>
         <p>${escapeHtml(memory.content)}</p>
         <div class="meta">
           <span class="chip">${escapeHtml(memory.source)}</span>
           <span class="chip">${escapeHtml(memory.kind)}</span>
+          <span class="chip">I${memory.importance}</span>
           ${tags}
         </div>
       </article>
@@ -191,6 +219,7 @@ function renderLedger(memories) {
         </div>
         <p>${escapeHtml(memory.content)}</p>
         <div class="meta">
+          <span class="chip">${escapeHtml(memoryClassLabel(memory.memory_class))}</span>
           <span class="chip">${escapeHtml(memory.day_key)}</span>
           <span class="chip">${escapeHtml(memory.week_key)}</span>
           <span class="chip">${escapeHtml(memory.hour_bucket)}</span>
@@ -217,6 +246,7 @@ function renderSearchResults(results) {
         </div>
         <p>${escapeHtml(memory.content)}</p>
         <div class="meta">
+          <span class="chip">${escapeHtml(memoryClassLabel(memory.memory_class))}</span>
           <span class="chip">${escapeHtml(memory.day_key)}</span>
           <span class="chip">${escapeHtml(memory.week_key)}</span>
           <span class="chip">${escapeHtml(memory.hour_bucket)}</span>
@@ -279,6 +309,9 @@ function applySample() {
   els.memoryTopic.value = 'product';
   els.memoryImportance.value = '5';
   els.importanceValue.textContent = '5';
+  if (els.memoryClass) {
+    els.memoryClass.value = 'info';
+  }
   updateView('capture');
 }
 
@@ -296,6 +329,7 @@ async function saveMemory() {
     source: els.memorySource.value,
     topic: els.memoryTopic.value.trim(),
     importance: Number(els.memoryImportance.value || 3),
+    memory_class: els.memoryClass?.value || '',
     session_id: state.conversationId,
   };
 

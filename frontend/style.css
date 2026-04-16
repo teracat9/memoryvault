@@ -532,6 +532,33 @@ select:focus {
   font-size: 1.15rem;
 }
 
+.mix-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.mix-chip {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+
+.mix-chip span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mix-chip strong {
+  display: block;
+  margin-top: 6px;
+  font-family: 'Fraunces', serif;
+  font-size: 1.05rem;
+}
+
 .status-dot {
   width: 12px;
   height: 12px;
@@ -904,6 +931,11 @@ body::before {
   grid-template-columns: 1fr 1fr;
 }
 
+.mix-grid {
+  grid-template-columns: 1fr 1fr;
+}
+
+.mix-chip,
 .snapshot-item,
 .memory-card,
 .ledger-item,

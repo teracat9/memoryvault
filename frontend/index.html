@@ -122,6 +122,19 @@
               </label>
             </div>
 
+            <div class="field-row">
+              <label class="field">
+                <span>메모 종류</span>
+                <select id="memoryClass">
+                  <option value="">자동 분류</option>
+                  <option value="short_term">단기기억</option>
+                  <option value="long_term">장기기억</option>
+                  <option value="info">정보기억</option>
+                  <option value="relationship">관계기억</option>
+                </select>
+              </label>
+            </div>
+
             <button id="saveMemory" class="primary">기억 저장하기</button>
             <div id="captureStatus" class="status">벡터 메모리가 대기 중입니다.</div>
           </section>
@@ -180,6 +193,7 @@
               <strong id="snapshotReady">No</strong>
             </div>
           </div>
+          <div id="memoryMix" class="mix-grid"></div>
         </section>
 
         <section class="panel side-card">
