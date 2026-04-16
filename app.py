@@ -1473,7 +1473,14 @@ def _is_retryable_gemini_error(exc: Exception) -> bool:
     return any(token in text for token in ["503", "unavailable", "overloaded", "deadline_exceeded", "resource_exhausted", "rate limit"])
 
 
-def _call_gemini_model(prompt: str, model: str) -> str:
+def _call_gemini_model(
+    prompt: str,
+    model: str,
+    *,
+    system_instruction: str = SYSTEM_INSTRUCTION,
+    temperature: float = 0.25,
+    max_output_tokens: int = 256,
+) -> str:
     if genai_types is None:
         response = gemini_client.models.generate_content(
             model=model,
@@ -1484,16 +1491,77 @@ def _call_gemini_model(prompt: str, model: str) -> str:
             model=model,
             contents=prompt,
             config=genai_types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                temperature=0.25,
+                system_instruction=system_instruction,
+                temperature=temperature,
                 top_p=0.9,
-                max_output_tokens=256,
+                max_output_tokens=max_output_tokens,
             ),
         )
     text = getattr(response, "text", None)
     if isinstance(text, str) and text.strip():
         return text.strip()
     return ""
+
+
+def _build_private_reasoning_prompt(
+    query: str,
+    memories: List[Dict[str, Any]],
+    recent_messages: List[Dict[str, Any]],
+    conversation_state: Dict[str, Any],
+) -> str:
+    memory_briefs = []
+    for memory in memories[:5]:
+        memory_briefs.append(
+            {
+                "class": _memory_class_label(memory.get("memory_class")),
+                "source": memory.get("source"),
+                "kind": memory.get("kind"),
+                "content": memory.get("content"),
+                "score": memory.get("score", 0),
+            }
+        )
+    return json.dumps(
+        {
+            "task": "private_reasoning",
+            "rule": "think silently and return compact JSON only",
+            "query": query,
+            "conversation_focus": conversation_state.get("focus", ""),
+            "recent_turns": recent_messages[-6:],
+            "retrieved_memories": memory_briefs,
+            "output_schema": {
+                "answer_angle": "one short sentence about what the reply should focus on",
+                "tone": "brief description of tone",
+                "memory_targets": ["short_term", "long_term", "info", "relationship"],
+                "dont_say": ["anything that should stay private or should not appear verbatim"],
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def _build_final_gemini_prompt(
+    query: str,
+    memories: List[Dict[str, Any]],
+    recent_messages: List[Dict[str, Any]],
+    conversation_state: Dict[str, Any],
+    private_notes: str,
+) -> str:
+    context = _format_memory_context(memories)
+    trail = conversation_state.get("trail", "None")
+    return (
+        f"System instructions:\n{SYSTEM_INSTRUCTION}\n\n"
+        f"Private reasoning notes:\n{private_notes}\n\n"
+        f"User question:\n{query}\n\n"
+        f"Conversation focus:\n{conversation_state.get('focus', 'None')}\n\n"
+        f"Recent conversation trail:\n{trail}\n\n"
+        f"Relevant memories:\n{context}\n\n"
+        "Respond like a KakaoTalk message. Use 1 to 2 short lines only. "
+        "No monologue, no scene setting, no long explanation, no poetic narration. "
+        "Anchor the reply to the conversation focus first, then the most relevant memory. "
+        "If the user only greets, reply briefly and naturally. "
+        "Do not imitate example phrases or signature lines from the prompt. "
+        "Do not mention private reasoning notes."
+    )
 
 
 async def _generate_ai_reply(
@@ -1506,13 +1574,28 @@ async def _generate_ai_reply(
     if not gemini_client:
         return {"text": local_answer, "provider": "local", "model": None}
 
-    prompt = _build_gemini_prompt(query, memories, recent_messages, conversation_state)
+    private_prompt = _build_private_reasoning_prompt(query, memories, recent_messages, conversation_state)
+    private_notes = ""
+    prompt = ""
     models_to_try = [GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]
     last_error: Optional[Exception] = None
 
     for attempt, model in enumerate(models_to_try, start=1):
         for retry in range(3):
             try:
+                if not private_notes:
+                    private_notes = await asyncio.to_thread(
+                        _call_gemini_model,
+                        private_prompt,
+                        model,
+                        system_instruction=(
+                            "You are a private reasoning engine. "
+                            "Return compact JSON only and never write anything meant for the user."
+                        ),
+                        temperature=0.05,
+                        max_output_tokens=160,
+                    )
+                prompt = _build_final_gemini_prompt(query, memories, recent_messages, conversation_state, private_notes)
                 text = await asyncio.to_thread(_call_gemini_model, prompt, model)
                 if text:
                     return {
