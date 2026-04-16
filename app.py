@@ -5,21 +5,33 @@ import math
 import os
 import re
 from collections import Counter
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+import asyncpg
 import aiosqlite
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except Exception:  # pragma: no cover - optional dependency during local editing
+    genai = None
+    genai_types = None
 
 
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "frontend"
-DB_PATH = BASE_DIR / "memoryvault.db"
+DB_PATH = Path(os.getenv("MEMORYVAULT_DB_PATH", str(BASE_DIR / "memoryvault.db"))).expanduser()
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
 EMBED_DIM = 256
 DEFAULT_CHAT_CONVERSATION = "default"
 CHUNK_MAX_CHARS = 420
@@ -36,6 +48,8 @@ if FRONTEND_DIR.exists():
     app.mount("/frontend", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend")
 
 db_lock: Optional[asyncio.Lock] = None
+pg_pool: Optional[asyncpg.Pool] = None
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if genai and GEMINI_API_KEY else None
 
 
 def _get_db_lock() -> asyncio.Lock:
@@ -43,6 +57,29 @@ def _get_db_lock() -> asyncio.Lock:
     if db_lock is None:
         db_lock = asyncio.Lock()
     return db_lock
+
+
+def _using_postgres() -> bool:
+    return bool(DATABASE_URL)
+
+
+async def _get_pg_pool() -> asyncpg.Pool:
+    global pg_pool
+    if pg_pool is None:
+        pg_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    return pg_pool
+
+
+@asynccontextmanager
+async def _db_cursor():
+    if _using_postgres():
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            yield conn
+    else:
+        async with aiosqlite.connect(str(DB_PATH)) as conn:
+            await _configure_sqlite(conn)
+            yield conn
 
 
 def _utc_now() -> datetime:
@@ -261,95 +298,197 @@ def _query_time_hint(query: str) -> str:
     return ""
 
 
-async def _configure_db(conn: aiosqlite.Connection) -> None:
+async def _configure_sqlite(conn: aiosqlite.Connection) -> None:
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA synchronous=NORMAL")
     await conn.execute("PRAGMA busy_timeout=5000")
 
 
 async def init_db() -> None:
-    async with aiosqlite.connect(str(DB_PATH)) as conn:
-        await _configure_db(conn)
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS memories (
-                id TEXT PRIMARY KEY,
-                entry_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                source TEXT NOT NULL,
-                role TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                day_key TEXT NOT NULL,
-                week_key TEXT NOT NULL,
-                hour_bucket TEXT NOT NULL,
-                importance INTEGER NOT NULL,
-                tags_json TEXT NOT NULL,
-                topic TEXT NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                chunk_total INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                memory_text TEXT NOT NULL,
-                embedding_json TEXT NOT NULL,
-                token_count INTEGER NOT NULL,
-                session_id TEXT NOT NULL,
-                meta_json TEXT NOT NULL
+    if _using_postgres():
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    seq BIGSERIAL PRIMARY KEY,
+                    id TEXT UNIQUE NOT NULL,
+                    entry_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    day_key TEXT NOT NULL,
+                    week_key TEXT NOT NULL,
+                    hour_bucket TEXT NOT NULL,
+                    importance INTEGER NOT NULL,
+                    tags_json TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    chunk_total INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    memory_text TEXT NOT NULL,
+                    embedding_json TEXT NOT NULL,
+                    token_count INTEGER NOT NULL,
+                    session_id TEXT NOT NULL,
+                    meta_json TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id TEXT PRIMARY KEY,
-                conversation_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    seq BIGSERIAL PRIMARY KEY,
+                    id TEXT UNIQUE NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        await conn.commit()
+    else:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(str(DB_PATH)) as conn:
+            await _configure_sqlite(conn)
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY,
+                    entry_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    day_key TEXT NOT NULL,
+                    week_key TEXT NOT NULL,
+                    hour_bucket TEXT NOT NULL,
+                    importance INTEGER NOT NULL,
+                    tags_json TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    chunk_total INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    memory_text TEXT NOT NULL,
+                    embedding_json TEXT NOT NULL,
+                    token_count INTEGER NOT NULL,
+                    session_id TEXT NOT NULL,
+                    meta_json TEXT NOT NULL
+                )
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            await conn.commit()
 
 
 async def save_memory_records(records: List[Dict[str, Any]]) -> None:
     if not records:
         return
     async with _get_db_lock():
-        async with aiosqlite.connect(str(DB_PATH)) as conn:
-            await _configure_db(conn)
-            for record in records:
-                await conn.execute(
-                    """
-                    INSERT OR REPLACE INTO memories (
-                        id, entry_id, kind, source, role, created_at, day_key, week_key, hour_bucket,
-                        importance, tags_json, topic, chunk_index, chunk_total, content, memory_text,
-                        embedding_json, token_count, session_id, meta_json
+        if _using_postgres():
+            pool = await _get_pg_pool()
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    for record in records:
+                        await conn.execute(
+                            """
+                            INSERT INTO memories (
+                                id, entry_id, kind, source, role, created_at, day_key, week_key, hour_bucket,
+                                importance, tags_json, topic, chunk_index, chunk_total, content, memory_text,
+                                embedding_json, token_count, session_id, meta_json
+                            )
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                            ON CONFLICT (id) DO UPDATE SET
+                                entry_id = EXCLUDED.entry_id,
+                                kind = EXCLUDED.kind,
+                                source = EXCLUDED.source,
+                                role = EXCLUDED.role,
+                                created_at = EXCLUDED.created_at,
+                                day_key = EXCLUDED.day_key,
+                                week_key = EXCLUDED.week_key,
+                                hour_bucket = EXCLUDED.hour_bucket,
+                                importance = EXCLUDED.importance,
+                                tags_json = EXCLUDED.tags_json,
+                                topic = EXCLUDED.topic,
+                                chunk_index = EXCLUDED.chunk_index,
+                                chunk_total = EXCLUDED.chunk_total,
+                                content = EXCLUDED.content,
+                                memory_text = EXCLUDED.memory_text,
+                                embedding_json = EXCLUDED.embedding_json,
+                                token_count = EXCLUDED.token_count,
+                                session_id = EXCLUDED.session_id,
+                                meta_json = EXCLUDED.meta_json
+                            """,
+                            (
+                                record["id"],
+                                record["entry_id"],
+                                record["kind"],
+                                record["source"],
+                                record["role"],
+                                record["created_at"],
+                                record["day_key"],
+                                record["week_key"],
+                                record["hour_bucket"],
+                                record["importance"],
+                                json.dumps(record["tags"], ensure_ascii=False),
+                                record["topic"],
+                                record["chunk_index"],
+                                record["chunk_total"],
+                                record["content"],
+                                record["memory_text"],
+                                json.dumps(record["embedding"], ensure_ascii=False),
+                                record["token_count"],
+                                record["session_id"],
+                                json.dumps(record["meta"], ensure_ascii=False),
+                            ),
+                        )
+        else:
+            async with aiosqlite.connect(str(DB_PATH)) as conn:
+                await _configure_sqlite(conn)
+                for record in records:
+                    await conn.execute(
+                        """
+                        INSERT OR REPLACE INTO memories (
+                            id, entry_id, kind, source, role, created_at, day_key, week_key, hour_bucket,
+                            importance, tags_json, topic, chunk_index, chunk_total, content, memory_text,
+                            embedding_json, token_count, session_id, meta_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            record["id"],
+                            record["entry_id"],
+                            record["kind"],
+                            record["source"],
+                            record["role"],
+                            record["created_at"],
+                            record["day_key"],
+                            record["week_key"],
+                            record["hour_bucket"],
+                            record["importance"],
+                            json.dumps(record["tags"], ensure_ascii=False),
+                            record["topic"],
+                            record["chunk_index"],
+                            record["chunk_total"],
+                            record["content"],
+                            record["memory_text"],
+                            json.dumps(record["embedding"], ensure_ascii=False),
+                            record["token_count"],
+                            record["session_id"],
+                            json.dumps(record["meta"], ensure_ascii=False),
+                        ),
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        record["id"],
-                        record["entry_id"],
-                        record["kind"],
-                        record["source"],
-                        record["role"],
-                        record["created_at"],
-                        record["day_key"],
-                        record["week_key"],
-                        record["hour_bucket"],
-                        record["importance"],
-                        json.dumps(record["tags"], ensure_ascii=False),
-                        record["topic"],
-                        record["chunk_index"],
-                        record["chunk_total"],
-                        record["content"],
-                        record["memory_text"],
-                        json.dumps(record["embedding"], ensure_ascii=False),
-                        record["token_count"],
-                        record["session_id"],
-                        json.dumps(record["meta"], ensure_ascii=False),
-                    ),
-                )
-            await conn.commit()
+                await conn.commit()
 
 
 async def save_chat_message(conversation_id: str, role: str, content: str, created_at: Optional[str] = None) -> Dict[str, Any]:
@@ -361,34 +500,66 @@ async def save_chat_message(conversation_id: str, role: str, content: str, creat
         "created_at": created_at or _iso_now(),
     }
     async with _get_db_lock():
-        async with aiosqlite.connect(str(DB_PATH)) as conn:
-            await _configure_db(conn)
-            await conn.execute(
-                """
-                INSERT INTO chat_messages (id, conversation_id, role, content, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (message["id"], message["conversation_id"], message["role"], message["content"], message["created_at"]),
-            )
-            await conn.commit()
+        if _using_postgres():
+            pool = await _get_pg_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO chat_messages (id, conversation_id, role, content, created_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (id) DO UPDATE SET
+                        conversation_id = EXCLUDED.conversation_id,
+                        role = EXCLUDED.role,
+                        content = EXCLUDED.content,
+                        created_at = EXCLUDED.created_at
+                    """,
+                    (message["id"], message["conversation_id"], message["role"], message["content"], message["created_at"]),
+                )
+        else:
+            async with aiosqlite.connect(str(DB_PATH)) as conn:
+                await _configure_sqlite(conn)
+                await conn.execute(
+                    """
+                    INSERT INTO chat_messages (id, conversation_id, role, content, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (message["id"], message["conversation_id"], message["role"], message["content"], message["created_at"]),
+                )
+                await conn.commit()
     return message
 
 
 async def fetch_recent_messages(conversation_id: str, limit: int = RECENT_MESSAGE_LIMIT) -> List[Dict[str, Any]]:
-    async with aiosqlite.connect(str(DB_PATH)) as conn:
-        await _configure_db(conn)
-        cursor = await conn.execute(
-            """
-            SELECT role, content, created_at
-            FROM chat_messages
-            WHERE conversation_id = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (conversation_id, limit),
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
+    if _using_postgres():
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT role, content, created_at
+                FROM chat_messages
+                WHERE conversation_id = $1
+                ORDER BY created_at DESC, seq DESC
+                LIMIT $2
+                """,
+                conversation_id,
+                limit,
+            )
+        rows = [(row["role"], row["content"], row["created_at"]) for row in rows]
+    else:
+        async with aiosqlite.connect(str(DB_PATH)) as conn:
+            await _configure_sqlite(conn)
+            cursor = await conn.execute(
+                """
+                SELECT role, content, created_at
+                FROM chat_messages
+                WHERE conversation_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (conversation_id, limit),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
     items = [{"role": row[0], "content": row[1], "created_at": row[2]} for row in rows]
     return list(reversed(items))
 
@@ -529,21 +700,61 @@ async def insert_memory(
 
 
 async def fetch_memories(limit: int = 120) -> List[Dict[str, Any]]:
-    async with aiosqlite.connect(str(DB_PATH)) as conn:
-        await _configure_db(conn)
-        cursor = await conn.execute(
-            """
-            SELECT id, entry_id, kind, source, role, created_at, day_key, week_key, hour_bucket,
-                   importance, tags_json, topic, chunk_index, chunk_total, content, memory_text,
-                   embedding_json, token_count, session_id, meta_json
-            FROM memories
-            ORDER BY created_at DESC, rowid DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
+    if _using_postgres():
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, entry_id, kind, source, role, created_at, day_key, week_key, hour_bucket,
+                       importance, tags_json, topic, chunk_index, chunk_total, content, memory_text,
+                       embedding_json, token_count, session_id, meta_json
+                FROM memories
+                ORDER BY created_at DESC, seq DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        rows = [
+            (
+                row["id"],
+                row["entry_id"],
+                row["kind"],
+                row["source"],
+                row["role"],
+                row["created_at"],
+                row["day_key"],
+                row["week_key"],
+                row["hour_bucket"],
+                row["importance"],
+                row["tags_json"],
+                row["topic"],
+                row["chunk_index"],
+                row["chunk_total"],
+                row["content"],
+                row["memory_text"],
+                row["embedding_json"],
+                row["token_count"],
+                row["session_id"],
+                row["meta_json"],
+            )
+            for row in rows
+        ]
+    else:
+        async with aiosqlite.connect(str(DB_PATH)) as conn:
+            await _configure_sqlite(conn)
+            cursor = await conn.execute(
+                """
+                SELECT id, entry_id, kind, source, role, created_at, day_key, week_key, hour_bucket,
+                       importance, tags_json, topic, chunk_index, chunk_total, content, memory_text,
+                       embedding_json, token_count, session_id, meta_json
+                FROM memories
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
 
     memories: List[Dict[str, Any]] = []
     for row in rows:
@@ -635,6 +846,36 @@ def _memory_brief(memory: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _format_recent_messages(messages: List[Dict[str, Any]]) -> str:
+    if not messages:
+        return "None"
+    lines = []
+    for message in messages[-8:]:
+        lines.append(f"{message['role']}: {message['content']}")
+    return "\n".join(lines)
+
+
+def _format_memory_context(memories: List[Dict[str, Any]]) -> str:
+    if not memories:
+        return "No relevant memories found."
+    blocks = []
+    for index, memory in enumerate(memories[:6], start=1):
+        tags = ", ".join(memory["tags"]) if memory["tags"] else "none"
+        blocks.append(
+            "\n".join(
+                [
+                    f"[{index}] score={memory.get('score', 0)}",
+                    f"timestamp={memory['created_at']}",
+                    f"source={memory['source']} role={memory['role']} kind={memory['kind']}",
+                    f"day={memory['day_key']} week={memory['week_key']} bucket={memory['hour_bucket']}",
+                    f"importance={memory['importance']} tags={tags} topic={memory['topic'] or 'none'}",
+                    f"content={memory['content']}",
+                ]
+            )
+        )
+    return "\n\n".join(blocks)
+
+
 def _compose_local_answer(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> str:
     if not memories:
         return (
@@ -660,6 +901,66 @@ def _compose_local_answer(query: str, memories: List[Dict[str, Any]], recent_mes
         + conversation_hint
         + "\n\n핵심은 위 조각들을 시간순과 태그 축으로 다시 엮어보면 됩니다."
     )
+
+
+def _build_gemini_prompt(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> str:
+    system = (
+        "You are Memory Vault, a memory-first assistant. "
+        "Answer in Korean unless the user clearly uses another language. "
+        "Use the retrieved memories and recent chat context to answer with concrete details, dates, tags, and chronology. "
+        "If the evidence is weak, say so clearly instead of inventing details. "
+        "Keep the answer concise but useful. "
+        "When helpful, end with a short '근거' section using 2-4 bullets."
+    )
+    context = _format_memory_context(memories)
+    convo = _format_recent_messages(recent_messages)
+    return (
+        f"{system}\n\n"
+        f"User question:\n{query}\n\n"
+        f"Recent conversation:\n{convo}\n\n"
+        f"Relevant memories:\n{context}\n\n"
+        "Compose the best possible answer now."
+    )
+
+
+async def _generate_ai_reply(query: str, memories: List[Dict[str, Any]], recent_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    local_answer = _compose_local_answer(query, memories, recent_messages)
+    if not gemini_client:
+        return {"text": local_answer, "provider": "local", "model": None}
+
+    prompt = _build_gemini_prompt(query, memories, recent_messages)
+
+    def _call_gemini() -> str:
+        if genai_types is None:
+            response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        else:
+            response = gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.4,
+                    top_p=0.9,
+                    max_output_tokens=512,
+                ),
+            )
+        text = getattr(response, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+        return local_answer
+
+    try:
+        text = await asyncio.to_thread(_call_gemini)
+        return {
+            "text": text,
+            "provider": "gemini",
+            "model": GEMINI_MODEL,
+        }
+    except Exception as exc:
+        return {
+            "text": f"{local_answer}\n\n(제미나이 호출 실패로 로컬 폴백으로 답했습니다: {exc.__class__.__name__})",
+            "provider": "local-fallback",
+            "model": GEMINI_MODEL,
+        }
 
 
 class MemoryCreateRequest(BaseModel):
@@ -708,6 +1009,11 @@ async def bootstrap() -> Dict[str, Any]:
     recent_messages = await fetch_recent_messages(DEFAULT_CHAT_CONVERSATION, limit=12)
     return {
         "stats": await _stats_payload(),
+        "ai": {
+            "provider": "gemini" if gemini_client else "local",
+            "model": GEMINI_MODEL,
+            "ready": bool(gemini_client),
+        },
         "recent_memories": [_memory_brief(memory) for memory in memories],
         "recent_messages": recent_messages,
         "conversation_id": DEFAULT_CHAT_CONVERSATION,
@@ -715,19 +1021,29 @@ async def bootstrap() -> Dict[str, Any]:
 
 
 async def _stats_payload() -> Dict[str, Any]:
-    async with aiosqlite.connect(str(DB_PATH)) as conn:
-        await _configure_db(conn)
-        cursor = await conn.execute("SELECT COUNT(DISTINCT entry_id), COUNT(*), MAX(created_at) FROM memories")
-        row = await cursor.fetchone()
-        await cursor.close()
-        cursor = await conn.execute("SELECT COUNT(*) FROM chat_messages")
-        chat_row = await cursor.fetchone()
-        await cursor.close()
+    if _using_postgres():
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT COUNT(DISTINCT entry_id) AS memory_count, COUNT(*) AS chunk_count, MAX(created_at) AS last_saved_at FROM memories")
+            chat_row = await conn.fetchrow("SELECT COUNT(*) AS chat_count FROM chat_messages")
+        memory_count = int(row["memory_count"] or 0) if row else 0
+        chunk_count = int(row["chunk_count"] or 0) if row else 0
+        last_saved_at = row["last_saved_at"] if row else None
+        chat_count = int(chat_row["chat_count"] or 0) if chat_row else 0
+    else:
+        async with aiosqlite.connect(str(DB_PATH)) as conn:
+            await _configure_sqlite(conn)
+            cursor = await conn.execute("SELECT COUNT(DISTINCT entry_id), COUNT(*), MAX(created_at) FROM memories")
+            row = await cursor.fetchone()
+            await cursor.close()
+            cursor = await conn.execute("SELECT COUNT(*) FROM chat_messages")
+            chat_row = await cursor.fetchone()
+            await cursor.close()
 
-    memory_count = int(row[0] or 0)
-    chunk_count = int(row[1] or 0)
-    last_saved_at = row[2] or None
-    chat_count = int(chat_row[0] or 0)
+        memory_count = int(row[0] or 0)
+        chunk_count = int(row[1] or 0)
+        last_saved_at = row[2] or None
+        chat_count = int(chat_row[0] or 0)
     return {
         "memory_count": memory_count,
         "chunk_count": chunk_count,
@@ -768,7 +1084,8 @@ async def chat(payload: ChatRequest) -> Dict[str, Any]:
 
     relevant_memories = await search_memories(query, limit=6)
     recent_messages = await fetch_recent_messages(payload.conversation_id, limit=RECENT_MESSAGE_LIMIT)
-    answer = _compose_local_answer(query, relevant_memories, recent_messages)
+    ai_reply = await _generate_ai_reply(query, relevant_memories, recent_messages)
+    answer = ai_reply["text"]
 
     assistant_message = await save_chat_message(payload.conversation_id, "assistant", answer)
     await insert_memory(
@@ -796,6 +1113,8 @@ async def chat(payload: ChatRequest) -> Dict[str, Any]:
 
     return {
         "reply": answer,
+        "provider": ai_reply["provider"],
+        "model": ai_reply["model"],
         "assistant_message": assistant_message,
         "retrieved_memories": [_memory_brief(memory) for memory in relevant_memories],
         "stats": await _stats_payload(),

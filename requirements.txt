@@ -2,3 +2,5 @@ fastapi
 uvicorn[standard]
 aiosqlite
 python-dotenv
+google-genai
+asyncpg

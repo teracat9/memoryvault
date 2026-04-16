@@ -10,134 +10,206 @@
   <link rel="stylesheet" href="/frontend/style.css" />
 </head>
 <body>
-  <div class="shell">
+  <div class="app-shell">
     <div class="noise"></div>
-    <header class="hero">
-      <div class="hero-copy">
-        <div class="eyebrow">Persistent Memory Engine</div>
-        <h1>Memory Vault</h1>
-        <p>
-          시간, 태그, 중요도, 세션을 함께 저장하고 벡터로 검색해서
-          대화와 메모가 끊기지 않게 만드는 기억형 AI.
-        </p>
+
+    <header class="topbar panel">
+      <div class="brand">
+        <div class="brand-mark">◎</div>
+        <div>
+          <div class="eyebrow">Persistent Memory Engine</div>
+          <h1>Memory Vault</h1>
+        </div>
       </div>
-      <div class="hero-stats">
-        <div class="stat-card">
+
+      <div class="topbar-meta">
+        <div class="meta-pill">
+          <span>AI</span>
+          <strong id="aiStatus">offline</strong>
+        </div>
+        <div class="meta-pill">
+          <span>Model</span>
+          <strong id="aiModel">-</strong>
+        </div>
+        <div class="meta-pill">
           <span>Memories</span>
           <strong id="statMemories">0</strong>
         </div>
-        <div class="stat-card">
+        <div class="meta-pill">
           <span>Chunks</span>
           <strong id="statChunks">0</strong>
         </div>
-        <div class="stat-card">
+        <div class="meta-pill">
           <span>Chats</span>
           <strong id="statChats">0</strong>
-        </div>
-        <div class="stat-card accent">
-          <span>Last saved</span>
-          <strong id="statLastSaved">-</strong>
         </div>
       </div>
     </header>
 
-    <main class="grid">
-      <section class="panel capture">
-        <div class="panel-head">
+    <section class="command-dock panel">
+      <div class="dock-tabs" role="tablist" aria-label="Memory views">
+        <button class="dock-tab is-active" data-view="chat">Chat</button>
+        <button class="dock-tab" data-view="capture">Capture</button>
+        <button class="dock-tab" data-view="search">Search</button>
+        <button class="dock-tab" data-view="ledger">Ledger</button>
+      </div>
+
+      <div class="dock-actions">
+        <button id="saveDemo" class="ghost">샘플 기억 넣기</button>
+        <button id="focusChat" class="ghost">대화로 이동</button>
+        <button id="refreshAll" class="ghost">새로고침</button>
+      </div>
+    </section>
+
+    <main class="workspace">
+      <section class="stage panel">
+        <div class="stage-head">
           <div>
-            <div class="panel-kicker">Memory Capture</div>
-            <h2>새 기억 저장</h2>
+            <div class="eyebrow">Workspace</div>
+            <h2 id="stageTitle">기억 기반 대화</h2>
+            <p id="stageSubtitle">Gemini가 관련 기억을 찾아서 바로 답합니다.</p>
           </div>
-          <button id="saveDemo" class="ghost">샘플 입력</button>
+          <div class="stage-mini">
+            <span class="mini-chip" id="lastSavedChip">last saved -</span>
+            <span class="mini-chip accent" id="providerChip">local</span>
+          </div>
         </div>
 
-        <label class="field">
-          <span>메모 내용</span>
-          <textarea id="memoryText" rows="8" placeholder="예: 2026-04-16 저녁에 프로젝트 구조를 정리했고, 태그는 #work #ai #memory 를 달았다."></textarea>
-        </label>
-
-        <div class="field-row">
-          <label class="field">
-            <span>태그</span>
-            <input id="memoryTags" type="text" placeholder="work, ai, memory" />
-          </label>
-          <label class="field">
-            <span>소스</span>
-            <select id="memorySource">
-              <option value="note">note</option>
-              <option value="chat">chat</option>
-              <option value="journal">journal</option>
-              <option value="task">task</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="field-row">
-          <label class="field">
-            <span>토픽</span>
-            <input id="memoryTopic" type="text" placeholder="예: product, health, study" />
-          </label>
-          <label class="field">
-            <span>중요도</span>
-            <div class="slider-wrap">
-              <input id="memoryImportance" type="range" min="1" max="5" value="3" />
-              <div class="slider-meta"><span>1</span><span id="importanceValue">3</span><span>5</span></div>
+        <div class="stage-body">
+          <section class="view-panel is-active" data-view-panel="chat">
+            <div id="chatLog" class="chat-log">
+              <div class="empty">아직 대화가 없습니다.</div>
             </div>
-          </label>
-        </div>
+            <div class="composer">
+              <input id="chatInput" type="text" placeholder="예: 내가 최근에 뭐에 집중했지?" />
+              <button id="sendChat" class="primary">전송</button>
+            </div>
+          </section>
 
-        <button id="saveMemory" class="primary">기억 저장하기</button>
-        <div id="captureStatus" class="status">벡터 메모리가 대기 중입니다.</div>
+          <section class="view-panel" data-view-panel="capture">
+            <label class="field">
+              <span>메모 내용</span>
+              <textarea id="memoryText" rows="7" placeholder="예: 2026-04-16 저녁에 프로젝트 구조를 정리했고, 태그는 #work #ai #memory 를 달았다."></textarea>
+            </label>
+
+            <div class="field-row">
+              <label class="field">
+                <span>태그</span>
+                <input id="memoryTags" type="text" placeholder="work, ai, memory" />
+              </label>
+              <label class="field">
+                <span>소스</span>
+                <select id="memorySource">
+                  <option value="note">note</option>
+                  <option value="chat">chat</option>
+                  <option value="journal">journal</option>
+                  <option value="task">task</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="field-row">
+              <label class="field">
+                <span>토픽</span>
+                <input id="memoryTopic" type="text" placeholder="product, health, study" />
+              </label>
+              <label class="field">
+                <span>중요도</span>
+                <div class="slider-wrap">
+                  <input id="memoryImportance" type="range" min="1" max="5" value="3" />
+                  <div class="slider-meta"><span>1</span><span id="importanceValue">3</span><span>5</span></div>
+                </div>
+              </label>
+            </div>
+
+            <button id="saveMemory" class="primary">기억 저장하기</button>
+            <div id="captureStatus" class="status">벡터 메모리가 대기 중입니다.</div>
+          </section>
+
+          <section class="view-panel" data-view-panel="search">
+            <div class="search-bar">
+              <input id="searchQuery" type="text" placeholder="무엇이 기억나지? 예: 어제 저녁 프로젝트" />
+              <button id="runSearch" class="primary">검색</button>
+            </div>
+            <div class="suggestions">
+              <button class="suggestion" data-search="벡터 db 시간 태그 중요도">벡터 DB 기준으로 찾아줘</button>
+              <button class="suggestion" data-search="어제 저녁에 한 일">어제 저녁 기억</button>
+              <button class="suggestion" data-search="최근 설계 메모">최근 설계 메모</button>
+            </div>
+            <div id="searchResults" class="result-list">
+              <div class="empty">검색 결과가 여기에 나타납니다.</div>
+            </div>
+          </section>
+
+          <section class="view-panel" data-view-panel="ledger">
+            <div class="ledger-head">
+              <div class="eyebrow">Recent memory stream</div>
+              <div class="ledger-hint">최근 저장된 청크를 타임라인처럼 훑어볼 수 있습니다.</div>
+            </div>
+            <div id="ledgerList" class="ledger-list">
+              <div class="empty">아직 저장된 기억이 없습니다.</div>
+            </div>
+          </section>
+        </div>
       </section>
 
-      <section class="panel recall">
-        <div class="panel-head">
-          <div>
-            <div class="panel-kicker">Semantic Recall</div>
-            <h2>벡터 검색</h2>
+      <aside class="sidebar">
+        <section class="panel side-card">
+          <div class="side-head">
+            <div>
+              <div class="eyebrow">AI Snapshot</div>
+              <h3>상태</h3>
+            </div>
+            <span class="status-dot" id="aiDot"></span>
           </div>
-        </div>
-
-        <div class="search-bar">
-          <input id="searchQuery" type="text" placeholder="무엇이 기억나지? 예: 어제 저녁 프로젝트" />
-          <button id="runSearch" class="primary small">검색</button>
-        </div>
-
-        <div id="searchResults" class="result-list">
-          <div class="empty">검색 결과가 여기에 나타납니다.</div>
-        </div>
-      </section>
-
-      <section class="panel chat">
-        <div class="panel-head">
-          <div>
-            <div class="panel-kicker">Memory Chat</div>
-            <h2>기억 기반 대화</h2>
+          <div class="snapshot-grid">
+            <div class="snapshot-item">
+              <span>Provider</span>
+              <strong id="snapshotProvider">local</strong>
+            </div>
+            <div class="snapshot-item">
+              <span>Model</span>
+              <strong id="snapshotModel">-</strong>
+            </div>
+            <div class="snapshot-item">
+              <span>Last saved</span>
+              <strong id="snapshotSaved">-</strong>
+            </div>
+            <div class="snapshot-item">
+              <span>Ready</span>
+              <strong id="snapshotReady">No</strong>
+            </div>
           </div>
-        </div>
+        </section>
 
-        <div id="chatLog" class="chat-log">
-          <div class="empty">아직 대화가 없습니다.</div>
-        </div>
-
-        <div class="chat-compose">
-          <input id="chatInput" type="text" placeholder="AI에게 물어보세요. 예: 내가 최근에 뭐에 집중했지?" />
-          <button id="sendChat" class="primary small">전송</button>
-        </div>
-      </section>
-
-      <section class="panel ledger">
-        <div class="panel-head">
-          <div>
-            <div class="panel-kicker">Memory Ledger</div>
-            <h2>최근 저장된 청크</h2>
+        <section class="panel side-card">
+          <div class="side-head">
+            <div>
+              <div class="eyebrow">Memory Pulse</div>
+              <h3>최근 기억</h3>
+            </div>
           </div>
-        </div>
+          <div id="recentFeed" class="pulse-feed">
+            <div class="empty">최근 기억이 여기에 표시됩니다.</div>
+          </div>
+        </section>
 
-        <div id="ledgerList" class="ledger-list">
-          <div class="empty">아직 저장된 기억이 없습니다.</div>
-        </div>
-      </section>
+        <section class="panel side-card">
+          <div class="side-head">
+            <div>
+              <div class="eyebrow">Shortcuts</div>
+              <h3>조작법</h3>
+            </div>
+          </div>
+          <div class="shortcut-list">
+            <div><kbd>1</kbd> Chat</div>
+            <div><kbd>2</kbd> Capture</div>
+            <div><kbd>3</kbd> Search</div>
+            <div><kbd>4</kbd> Ledger</div>
+            <div><kbd>/</kbd> 검색 입력으로 이동</div>
+          </div>
+        </section>
+      </aside>
     </main>
   </div>
 
