@@ -226,6 +226,10 @@ button {
   padding: 11px 14px;
 }
 
+.ghost.danger {
+  color: #8d2c2c;
+}
+
 .primary {
   background: linear-gradient(135deg, rgba(184, 255, 75, 0.96), rgba(118, 227, 215, 0.78));
   color: #08100d;
@@ -671,6 +675,113 @@ select:focus {
 
   .chat-log {
     height: min(52svh, 460px);
+  }
+}
+
+@media (max-width: 520px) {
+  .app-shell {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .topbar,
+  .command-dock,
+  .stage,
+  .side-card {
+    border-radius: 18px;
+  }
+
+  .brand {
+    gap: 10px;
+  }
+
+  .brand-mark {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+  }
+
+  .brand h1 {
+    font-size: 1.45rem;
+  }
+
+  .topbar-meta {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .meta-pill {
+    padding: 9px 10px;
+    border-radius: 14px;
+  }
+
+  .command-dock {
+    padding: 10px 10px 12px;
+    gap: 10px;
+  }
+
+  .dock-tabs,
+  .dock-actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .dock-tab,
+  .ghost,
+  .primary,
+  .suggestion {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .workspace {
+    gap: 10px;
+  }
+
+  .stage-head {
+    padding: 12px;
+  }
+
+  .stage-head h2 {
+    font-size: 1.2rem;
+  }
+
+  .stage-head p {
+    margin-top: 6px;
+    font-size: 13px;
+  }
+
+  .chat-log {
+    padding: 12px 12px 0;
+    height: calc(100svh - 330px);
+  }
+
+  .bubble-stack {
+    max-width: 88%;
+  }
+
+  .bubble {
+    padding: 11px 12px;
+  }
+
+  .composer {
+    padding: 10px 12px 12px;
+    gap: 8px;
+  }
+
+  .composer input {
+    border-radius: 14px;
+    padding: 12px 12px;
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .field-row,
+  .search-bar,
+  .composer {
+    grid-template-columns: 1fr;
   }
 }
 

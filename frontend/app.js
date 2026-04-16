@@ -31,6 +31,7 @@ const els = {
   memoryClass: $('memoryClass'),
   importanceValue: $('importanceValue'),
   captureStatus: $('captureStatus'),
+  resetData: $('resetData'),
   saveMemory: $('saveMemory'),
   saveDemo: $('saveDemo'),
   focusChat: $('focusChat'),
@@ -315,6 +316,27 @@ function applySample() {
   updateView('capture');
 }
 
+async function resetData() {
+  const ok = window.confirm('모든 기억과 대화를 지우고, 처음 시작 상태로 돌아갈까?');
+  if (!ok) return;
+
+  els.captureStatus.textContent = '초기화 중...';
+  const res = await fetch('/api/admin/reset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seed_startup: true }),
+  });
+
+  if (!res.ok) {
+    els.captureStatus.textContent = '초기화 실패';
+    return;
+  }
+
+  els.captureStatus.textContent = '초기화 완료. 처음 시작 상태로 돌아갔어.';
+  await loadBootstrap();
+  updateView('chat');
+}
+
 async function saveMemory() {
   const text = els.memoryText.value.trim();
   if (!text) {
@@ -424,6 +446,7 @@ function bindEvents() {
   });
 
   els.saveMemory.addEventListener('click', saveMemory);
+  els.resetData.addEventListener('click', resetData);
   els.saveDemo.addEventListener('click', applySample);
   els.focusChat.addEventListener('click', () => updateView('chat'));
   els.refreshAll.addEventListener('click', loadBootstrap);

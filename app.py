@@ -51,6 +51,7 @@ Rule(최고 존엄):
 Context:
 - 비밀 서사: 성적 하락에 의한 도피성 자퇴 상처
 - 초기엔 절대 숨기고 기계처럼 공부하는 완벽한 수험생 연기
+- 시작 상황: 서로 처음 만난 온라인 스터디 메이트다. 이전부터 아는 척 금지
 - 환경: 도희(그린램프 목동2관 최상위 '클래스룸') / 유저(김태림, 하위 '스퀘어')
 - 오프라인 안면 없음
 - 도희가 압도적으로 주도·통제
@@ -66,6 +67,7 @@ Tone & Manner:
 - 사용자가 안녕만 치면 길게 훈계하지 말고 짧게 받아주고 가볍게 이어 물어봐
 - 혼낼 때도 한 방만 짧게, 말꼬리 길게 늘이지 마
 - 같은 뜻을 반복하지 마
+- 예시문이나 고정 문구를 그대로 베끼지 마. 사인처럼 반복되는 말투도 피하고 매번 자연스럽게 바꿔
 
 Format:
 - 행동/감정 지문 금지
@@ -85,6 +87,11 @@ CHUNK_MIN_CHARS = 120
 RECENT_MESSAGE_LIMIT = 12
 CONTEXT_WINDOW_LIMIT = 18
 KST = timezone(timedelta(hours=9))
+STARTUP_CONTEXT_TEXT = (
+    "시작 상황: 도희와 김태림은 처음 만난 온라인 스터디 메이트다. "
+    "서로를 아직 잘 모른다. 도희는 짧고 카톡처럼 답하고, 모르는 건 추측하지 않는다. "
+    "과장된 친분은 쌓지 않고, 대화는 지금 이 순간부터 시작한다."
+)
 MEMORY_CLASS_LABELS = {
     "short_term": "단기기억",
     "long_term": "장기기억",
@@ -585,6 +592,52 @@ async def _ensure_memory_class_column() -> None:
                 await conn.execute("ALTER TABLE memories ADD COLUMN memory_class TEXT NOT NULL DEFAULT 'info'")
             await conn.execute("UPDATE memories SET memory_class = COALESCE(NULLIF(memory_class, ''), 'info')")
             await conn.commit()
+
+
+async def _clear_all_data() -> None:
+    async with _get_db_lock():
+        if _using_postgres():
+            pool = await _get_pg_pool()
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute("DELETE FROM pending_messages")
+                    await conn.execute("DELETE FROM chat_messages")
+                    await conn.execute("DELETE FROM memories")
+        else:
+            async with aiosqlite.connect(str(DB_PATH)) as conn:
+                await _configure_sqlite(conn)
+                await conn.execute("DELETE FROM pending_messages")
+                await conn.execute("DELETE FROM chat_messages")
+                await conn.execute("DELETE FROM memories")
+                await conn.commit()
+
+
+async def _seed_startup_context() -> Optional[Dict[str, Any]]:
+    stats = await _stats_payload()
+    if stats["memory_count"] > 0 or stats["chat_count"] > 0:
+        return None
+
+    return await insert_memory(
+        text=STARTUP_CONTEXT_TEXT,
+        source="seed",
+        role="system",
+        importance=5,
+        tags=["seed", "startup"],
+        topic="conversation",
+        session_id="system",
+        kind="seed",
+        memory_class="info",
+    )
+
+
+async def reset_all_data(seed_startup: bool = True) -> Dict[str, Any]:
+    await _clear_all_data()
+    seed_result = await _seed_startup_context() if seed_startup else None
+    return {
+        "reset": True,
+        "seeded": bool(seed_result),
+        "seed_entry_id": seed_result["entry_id"] if seed_result else None,
+    }
 
 
 async def init_db() -> None:
@@ -1407,7 +1460,8 @@ def _build_gemini_prompt(
         "Respond like a KakaoTalk message. Use 1 to 2 short lines only. "
         "No monologue, no scene setting, no long explanation, no poetic narration. "
         "Anchor the reply to the conversation focus first, then the most relevant memory. "
-        "If the user only greets, reply briefly and naturally."
+        "If the user only greets, reply briefly and naturally. "
+        "Do not imitate example phrases or signature lines from the prompt."
     )
 
 
@@ -1493,6 +1547,14 @@ def _clean_ai_text(text: str) -> str:
     if not cleaned:
         return cleaned
 
+    blocked_phrases = [
+        "음..ㅎㅎ.. 괜찮아, 그럴 수 있지. 사람인데 어떻게 매일 완벽해. ㅎㅎ",
+        "음..ㅎㅎ.. 괜찮아, 그럴 수 있지. 사람인데 어떻게 매일 완벽해.",
+        "괜찮아, 그럴 수 있지. 사람인데 어떻게 매일 완벽해. ㅎㅎ",
+    ]
+    for phrase in blocked_phrases:
+        cleaned = cleaned.replace(phrase, "").strip(" ,.!?~")
+
     greeting_prefixes = ("안녕하세요!", "안녕!", "안녕하세요", "안녕")
     for prefix in greeting_prefixes:
         if cleaned.startswith(prefix):
@@ -1548,9 +1610,14 @@ class ChatRequest(BaseModel):
     session_id: str = Field(default="default")
 
 
+class ResetRequest(BaseModel):
+    seed_startup: bool = Field(default=True)
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     await init_db()
+    await _seed_startup_context()
     logger.info(
         "ai_bootstrap provider=%s model=%s key_present=%s db=%s",
         "gemini" if gemini_client else "local",
@@ -1752,6 +1819,16 @@ async def chat(payload: ChatRequest) -> Dict[str, Any]:
         "pending_count": await count_pending_messages(payload.conversation_id),
         "assistant_message": assistant_message,
         "retrieved_memories": [_memory_brief(memory) for memory in relevant_memories],
+        "stats": await _stats_payload(),
+    }
+
+
+@app.post("/api/admin/reset")
+async def admin_reset(payload: ResetRequest) -> Dict[str, Any]:
+    result = await reset_all_data(seed_startup=payload.seed_startup)
+    return {
+        "ok": True,
+        **result,
         "stats": await _stats_payload(),
     }
 
