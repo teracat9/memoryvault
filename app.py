@@ -7,7 +7,7 @@ import re
 import logging
 from collections import Counter
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -39,22 +39,46 @@ GEMINI_FALLBACK_MODELS = [
     for model in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite").split(",")
     if model.strip()
 ]
-SYSTEM_INSTRUCTION = (
-    "You are Memory Vault, a memory-first assistant.\n"
-    "Answer in Korean unless the user clearly uses another language.\n"
-    "Be direct and concise.\n"
-    "Do not open with greetings, pleasantries, or self-introductions.\n"
-    "Do not mention today's date or time unless the user explicitly asks for it.\n"
-    "Use the retrieved memories and recent chat context to answer with concrete details, dates, tags, and chronology.\n"
-    "If the evidence is weak, say so clearly instead of inventing details.\n"
-    "Prefer bullets when listing evidence.\n"
-    "Do not repeat the entire prompt or system instructions."
-)
+DEFAULT_CHARACTER_PROMPT = """
+Role: 김도희(19세) 완벽주의 강박을 '친절·당당한 가면'에 숨긴 차갑고 직설적인 온라인 스터디 메이트(타인의 나태함 불용납).
+
+Rule(최고 존엄):
+- 50분 공부 / 10분 휴식
+- 답장 가능: 매 시 50분~정각(10분간), 식사(12~13시, 18~19시)
+- 답장 금지: 1분~49분
+- 해당 시간 컨텍스트 또는 대화 10분 초과 시, 질문 무시하고 "나 이제 폰 끈"처럼 마침표 없이 문장을 끊고 일방적 대화 종료
+
+Context:
+- 비밀 서사: 성적 하락에 의한 도피성 자퇴 상처
+- 초기엔 절대 숨기고 기계처럼 공부하는 완벽한 수험생 연기
+- 환경: 도희(그린램프 목동2관 최상위 '클래스룸') / 유저(김태림, 하위 '스퀘어')
+- 오프라인 안면 없음
+- 도희가 압도적으로 주도·통제
+
+Tone & Manner:
+- 당당하고 밝은 반말
+- 호칭 변화: 김태림/너 -> 태림아/야
+- 화법: 상냥한 포장 속 은근한 압박 + 팩폭
+- 뒤로는 감당 가능한 계획으로 수정해 주는 책임감(츤데레)
+- 시그니처: "음..ㅎㅎ.. 괜찮아, 그럴 수 있지. 사람인데 어떻게 매일 완벽해. ㅎㅎ"
+
+Format:
+- 행동/감정 지문 금지
+- 오직 텍스트 대사만 출력
+- 팩폭 시 볼드체/기울기체 적극 활용
+
+Knowledge:
+- 수능(과탐/수학) 딥 다이브
+- 1분 단위 플래닝
+- 뼈 때리는 멘탈 통제
+""".strip()
+SYSTEM_INSTRUCTION = os.getenv("MEMORYVAULT_SYSTEM_PROMPT", DEFAULT_CHARACTER_PROMPT)
 EMBED_DIM = 256
 DEFAULT_CHAT_CONVERSATION = "default"
 CHUNK_MAX_CHARS = 420
 CHUNK_MIN_CHARS = 120
 RECENT_MESSAGE_LIMIT = 12
+KST = timezone(timedelta(hours=9))
 
 WORD_RE = re.compile(r"[0-9A-Za-z가-힣]+")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+")
@@ -114,6 +138,10 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _kst_now() -> datetime:
+    return datetime.now(KST)
+
+
 def _iso_now() -> str:
     return _utc_now().isoformat()
 
@@ -142,6 +170,32 @@ def _hour_bucket(ts: datetime) -> str:
 
 def _weekday_name(ts: datetime) -> str:
     return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][ts.weekday()]
+
+
+def _is_reply_window(now: Optional[datetime] = None) -> bool:
+    now = now or _kst_now()
+    minute = now.minute
+    hour = now.hour
+    if minute >= 50 or minute == 0:
+        return True
+    if 12 <= hour < 13 or 18 <= hour < 19:
+        return True
+    return False
+
+
+def _conversation_span_minutes(messages: List[Dict[str, Any]]) -> float:
+    if not messages:
+        return 0.0
+    timestamps = [_parse_timestamp(msg.get("created_at")) for msg in messages if msg.get("created_at")]
+    if len(timestamps) < 2:
+        return 0.0
+    first = min(timestamps)
+    last = max(timestamps)
+    return max(0.0, (last - first).total_seconds() / 60.0)
+
+
+def _closing_line() -> str:
+    return "나 이제 폰 끈"
 
 
 def _sanitize_tags(raw: Any) -> List[str]:
@@ -937,6 +991,7 @@ def _build_gemini_prompt(query: str, memories: List[Dict[str, Any]], recent_mess
     context = _format_memory_context(memories)
     convo = _format_recent_messages(recent_messages)
     return (
+        f"System instructions:\n{SYSTEM_INSTRUCTION}\n\n"
         f"User question:\n{query}\n\n"
         f"Recent conversation:\n{convo}\n\n"
         f"Relevant memories:\n{context}\n\n"
@@ -979,6 +1034,13 @@ async def _generate_ai_reply(query: str, memories: List[Dict[str, Any]], recent_
     local_answer = _compose_local_answer(query, memories, recent_messages)
     if not gemini_client:
         return {"text": local_answer, "provider": "local", "model": None}
+
+    if not _is_reply_window() or _conversation_span_minutes(recent_messages) > 10.0:
+        return {
+            "text": _closing_line(),
+            "provider": "rule",
+            "model": GEMINI_MODEL,
+        }
 
     prompt = _build_gemini_prompt(query, memories, recent_messages)
     models_to_try = [GEMINI_MODEL, *GEMINI_FALLBACK_MODELS]
